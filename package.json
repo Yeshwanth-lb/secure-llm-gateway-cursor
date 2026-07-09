@@ -3,10 +3,23 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Single-file, zero-dependency local LLM gateway proxy with bidirectional PII redaction and an embedded MCP server.",
+  "description": "Local LLM gateway proxy with bidirectional PII redaction and an embedded MCP server.",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/secure-llm-gateway.js",
+  "bin": {
+    "secure-llm-gateway": "dist/secure-llm-gateway.js"
+  },
   "scripts": {
-    "start": "node --experimental-strip-types secure-llm-gateway.ts",
-    "stdio": "node --experimental-strip-types secure-llm-gateway.ts --stdio",
+    "build": "tsc",
+    "start": "node dist/secure-llm-gateway.js",
+    "dev": "node --experimental-strip-types secure-llm-gateway.ts",
+    "stdio": "node dist/secure-llm-gateway.js --stdio",
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3"
   }
 }

@@ -178,19 +178,19 @@ A phase is **done** only when **all** of these hold:
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
 **Last updated:** 2026-07-09
-**Current phase:** Workstream A ✅ done (A1 + A2); next B1 / B2 / B3
-**Overall:** 3 / 7 phases complete. Redaction engine + StreamRedactor live. Suite 10/10 green.
-**Layout:** modularized 2026-07-09 — `src/{contracts,config,redaction,stream-redactor,routing,traffic-log,http-utils,server}.ts`; `secure-llm-gateway.ts` = entry + barrel. Tests import via the barrel.
+**Current phase:** Workstreams A + B ✅ done; next Phase C (integration + 6 acceptance criteria)
+**Overall:** 6 / 7 phases complete. Full bidirectional proxy + traffic log + MCP server live. Suite 21/21 green.
+**Layout:** modularized 2026-07-09 — `src/{contracts,config,redaction,stream-redactor,routing,traffic-log,proxy,mcp,http-utils,server}.ts`; `secure-llm-gateway.ts` = entry + barrel. Tests import via the barrel; shared e2e helpers in `tests/helpers/{fake-upstream,net}.ts`.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|
 | 0 — Skeleton & contracts | ✅ Done | `/healthz`→200 / unknown→404 hint / body>cap→413 | ✅ 3/3 | Contracts frozen; stubs throw "not implemented". `tests/phase-0.test.ts`. Node 22 strip-only mode → no param-properties. |
 | A1 — Redaction engine | ✅ Done | email/SSN/CC/api-key tokens+counts / malformed→raw scrub no-throw / non-Luhn 16-digit untouched | ✅ 4/4 | 7 default rules + Luhn; custom-rule loader (env+file, merged ahead); §3.2 overlap resolution; zero-length guard; deep-walk `redactJson`. `tests/phase-a1.test.ts`. |
 | A2 — StreamRedactor | ✅ Done | clean SSE round-trip / bad JSON no-crash / email split 3 chunks→`[REDACTED_MOCK_PII]` flushed before `[DONE]` | ✅ 3/3 | SSE framing, rolling holdback (default 96), flush injection, per-provider text-channel extraction. `tests/phase-a2.test.ts`. |
-| B1 — Routing | ⬜ Not started | — / — / — | — | |
-| B2 — Proxy + log | ⬜ Blocked on A1, B1 | — / — / — | — | |
-| B3 — MCP server | ⬜ Not started | — / — / — | — | |
-| C — Integration | ⬜ Blocked on all | — / — / — | — | 6 acceptance criteria pending |
+| B1 — Routing | ✅ Done | `/openai/*` prefix→openai+strip / unroutable→null / ambiguous `/v1/models`+`x-api-key`→anthropic sniff | ✅ 5/5 | 5-tier `resolveRoute` (returns `RouteResult\|null` — contract extended from throw, agreed 2026-07-09); `buildForwardHeaders` (hop-by-hop strip, `accept-encoding: identity`, auth preserved, control headers dropped); `x-llm-upstream` override. `tests/phase-b1.test.ts`. |
+| B2 — Proxy + log | ✅ Done | bidi redaction + entry logged / upstream down→502 logged / PII-heavy snapshot has no raw PII | ✅ 3/3 | Full pipeline: inbound scrub→forward (recompute length)→outbound scrub (JSON buffer / SSE via StreamRedactor)→finalize LogEntry. 100-entry ring buffer (newest-first, `clear()` test seam). Admin `GET /logs`, `GET /rules`. `src/proxy.ts`, `tests/phase-b2.test.ts`. |
+| B3 — MCP server | ✅ Done | initialize→tools/list→tools/call over Streamable HTTP (live log) / unknown method→-32601 / stdio stdout protocol-pure | ✅ 3/3 | One JSON-RPC dispatcher; transports: Streamable HTTP (`POST/GET/DELETE /mcp`), legacy HTTP+SSE (`/mcp/messages`), stdio (`--stdio`); tool `get_traffic_logs`. `src/mcp.ts`, `tests/phase-b3.test.ts`. |
+| C — Integration | ⬜ Next | — / — / — | — | 6 acceptance criteria (PRD §7) pending; hardening + runbook smoke. |
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)
 

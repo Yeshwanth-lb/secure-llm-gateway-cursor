@@ -16,6 +16,7 @@
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./src/config.ts";
 import { createGatewayServer } from "./src/server.ts";
+import { startStdioTransport } from "./src/mcp.ts";
 
 // ---- public barrel ----------------------------------------------------------
 export type {
@@ -38,13 +39,18 @@ export {
   redactJson,
 } from "./src/redaction.ts";
 export { StreamRedactor } from "./src/stream-redactor.ts";
-export { resolveRoute } from "./src/routing.ts";
+export { resolveRoute, buildForwardHeaders } from "./src/routing.ts";
 export { trafficLog } from "./src/traffic-log.ts";
+export { proxyRequest } from "./src/proxy.ts";
+export { dispatch, handleMcpHttp, isMcpPath } from "./src/mcp.ts";
 export { createGatewayServer } from "./src/server.ts";
 
 // ---- bootstrap --------------------------------------------------------------
 function main(): void {
   const config = loadConfig();
+  const stdio = process.argv.includes("--stdio") || process.env.MCP_STDIO === "1";
+  if (stdio) startStdioTransport(); // stdout stays JSON-RPC only; logs go to stderr
+
   const server = createGatewayServer();
   server.listen(config.port, config.host, () => {
     process.stderr.write(
