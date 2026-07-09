@@ -10,7 +10,8 @@
 
 ## 1. What we are building
 
-A **single-file, zero-dependency local LLM gateway proxy** — `secure-llm-gateway.ts`.
+A **zero-dependency local LLM gateway proxy** — modules under `src/`, entry point
+`secure-llm-gateway.ts`. *(Was single-file per the design docs; modularized 2026-07-09 — see §2.)*
 
 It sits between any LLM client (Cursor, Claude Code, LangChain, AutoGen, raw SDKs) and
 three upstream provider families (Anthropic, Gemini, OpenAI-compatible). It:
@@ -38,7 +39,7 @@ three upstream provider families (Anthropic, Gemini, OpenAI-compatible). It:
 |---|---|
 | Runtime | **Node ≥ 22** built-ins **only** (`node:http`, `node:https`, `node:crypto`, `node:readline`, `node:fs`, `node:url`, `node:test`). This machine runs Node v24. |
 | Dependencies | **Zero.** No `npm install` of runtime deps, no frameworks. Zero supply-chain surface is a feature, not an accident. |
-| Deliverable shape | Everything ships in **one file**: `secure-llm-gateway.ts`. |
+| Deliverable shape | **Module graph under `src/`** with `secure-llm-gateway.ts` as entry point + public barrel. *(Decision 2026-07-09, Mohit: the original single-file mandate in `newplan.md`/`IMPLEMENTATION_GUIDE.md` was intentionally overridden for maintainability. Still zero-dep, still `.ts` run directly.)* |
 | Run | `node --experimental-strip-types secure-llm-gateway.ts` (or `npx tsx …` on older Node). |
 | Bind | `127.0.0.1:8000` only (`GATEWAY_HOST`/`GATEWAY_PORT`). Never `0.0.0.0`. |
 | Auth headers | **Never redact** auth headers (`x-api-key`, `Authorization`, `x-goog-api-key`). Redaction is **body-only**. |
@@ -179,6 +180,7 @@ A phase is **done** only when **all** of these hold:
 **Last updated:** 2026-07-09
 **Current phase:** Workstream A ✅ done (A1 + A2); next B1 / B2 / B3
 **Overall:** 3 / 7 phases complete. Redaction engine + StreamRedactor live. Suite 10/10 green.
+**Layout:** modularized 2026-07-09 — `src/{contracts,config,redaction,stream-redactor,routing,traffic-log,http-utils,server}.ts`; `secure-llm-gateway.ts` = entry + barrel. Tests import via the barrel.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|
