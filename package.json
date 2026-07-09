@@ -1,0 +1,12 @@
+{
+  "name": "secure-llm-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Single-file, zero-dependency local LLM gateway proxy with bidirectional PII redaction and an embedded MCP server.",
+  "scripts": {
+    "start": "node --experimental-strip-types secure-llm-gateway.ts",
+    "stdio": "node --experimental-strip-types secure-llm-gateway.ts --stdio",
+    "test": "node --experimental-strip-types --test 'tests/*.test.ts'"
+  }
+}

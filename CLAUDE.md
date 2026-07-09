@@ -177,14 +177,14 @@ A phase is **done** only when **all** of these hold:
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
 **Last updated:** 2026-07-09
-**Current phase:** Phase 0 — not started
-**Overall:** 0 / 7 phases complete. `secure-llm-gateway.ts` not yet created.
+**Current phase:** Workstream A ✅ done (A1 + A2); next B1 / B2 / B3
+**Overall:** 3 / 7 phases complete. Redaction engine + StreamRedactor live. Suite 10/10 green.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|
-| 0 — Skeleton & contracts | ⬜ Not started | — / — / — | — | Contracts not yet frozen |
-| A1 — Redaction engine | ⬜ Not started | — / — / — | — | |
-| A2 — StreamRedactor | ⬜ Blocked on A1 | — / — / — | — | |
+| 0 — Skeleton & contracts | ✅ Done | `/healthz`→200 / unknown→404 hint / body>cap→413 | ✅ 3/3 | Contracts frozen; stubs throw "not implemented". `tests/phase-0.test.ts`. Node 22 strip-only mode → no param-properties. |
+| A1 — Redaction engine | ✅ Done | email/SSN/CC/api-key tokens+counts / malformed→raw scrub no-throw / non-Luhn 16-digit untouched | ✅ 4/4 | 7 default rules + Luhn; custom-rule loader (env+file, merged ahead); §3.2 overlap resolution; zero-length guard; deep-walk `redactJson`. `tests/phase-a1.test.ts`. |
+| A2 — StreamRedactor | ✅ Done | clean SSE round-trip / bad JSON no-crash / email split 3 chunks→`[REDACTED_MOCK_PII]` flushed before `[DONE]` | ✅ 3/3 | SSE framing, rolling holdback (default 96), flush injection, per-provider text-channel extraction. `tests/phase-a2.test.ts`. |
 | B1 — Routing | ⬜ Not started | — / — / — | — | |
 | B2 — Proxy + log | ⬜ Blocked on A1, B1 | — / — / — | — | |
 | B3 — MCP server | ⬜ Not started | — / — / — | — | |

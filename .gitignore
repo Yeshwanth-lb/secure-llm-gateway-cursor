@@ -1,14 +1,10 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
+# Node / TypeScript
+node_modules/
+npm-debug.log*
+yarn-error.log*
+*.tsbuildinfo
 dist/
-.venv/
-venv/
-env/
-.python-version
+build/
 
 # Config secrets / local state
 config/config.local.yaml
