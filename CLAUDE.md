@@ -178,8 +178,8 @@ A phase is **done** only when **all** of these hold:
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
 **Last updated:** 2026-07-09
-**Current phase:** Workstreams A + B ✅ done; next Phase C (integration + 6 acceptance criteria)
-**Overall:** 6 / 7 phases complete. Full bidirectional proxy + traffic log + MCP server live. Suite 21/21 green.
+**Current phase:** Phase C ✅ done — project complete
+**Overall:** 7 / 7 phases complete. Full bidirectional proxy + traffic log + MCP server + integration/acceptance suite live. Suite 32/32 green.
 **Layout:** modularized 2026-07-09 — `src/{contracts,config,redaction,stream-redactor,routing,traffic-log,proxy,mcp,http-utils,server}.ts`; `secure-llm-gateway.ts` = entry + barrel. Tests import via the barrel; shared e2e helpers in `tests/helpers/{fake-upstream,net}.ts`.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
@@ -190,7 +190,7 @@ A phase is **done** only when **all** of these hold:
 | B1 — Routing | ✅ Done | `/openai/*` prefix→openai+strip / unroutable→null / ambiguous `/v1/models`+`x-api-key`→anthropic sniff | ✅ 5/5 | 5-tier `resolveRoute` (returns `RouteResult\|null` — contract extended from throw, agreed 2026-07-09); `buildForwardHeaders` (hop-by-hop strip, `accept-encoding: identity`, auth preserved, control headers dropped); `x-llm-upstream` override. `tests/phase-b1.test.ts`. |
 | B2 — Proxy + log | ✅ Done | bidi redaction + entry logged / upstream down→502 logged / PII-heavy snapshot has no raw PII | ✅ 3/3 | Full pipeline: inbound scrub→forward (recompute length)→outbound scrub (JSON buffer / SSE via StreamRedactor)→finalize LogEntry. 100-entry ring buffer (newest-first, `clear()` test seam). Admin `GET /logs`, `GET /rules`. `src/proxy.ts`, `tests/phase-b2.test.ts`. |
 | B3 — MCP server | ✅ Done | initialize→tools/list→tools/call over Streamable HTTP (live log) / unknown method→-32601 / stdio stdout protocol-pure | ✅ 3/3 | One JSON-RPC dispatcher; transports: Streamable HTTP (`POST/GET/DELETE /mcp`), legacy HTTP+SSE (`/mcp/messages`), stdio (`--stdio`); tool `get_traffic_logs`. `src/mcp.ts`, `tests/phase-b3.test.ts`. |
-| C — Integration | ⬜ Next | — / — / — | — | 6 acceptance criteria (PRD §7) pending; hardening + runbook smoke. |
+| C — Integration | ✅ Done | 6 acceptance criteria (PRD §7) as happy set / malformed-JSON→raw-scrub no-crash / zero-length-regex guard + 127.0.0.1 bind | ✅ 11/11 | Full-stack e2e: inbound scrub, SSE fracture+flush, MCP over all 3 transports (Streamable HTTP / legacy SSE / stdio), 3-tier routing, Luhn false-positive kill. Hardening trio + runbook smoke (admin + MCP endpoints) verified. `tests/phase-c.test.ts`. |
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)
 
