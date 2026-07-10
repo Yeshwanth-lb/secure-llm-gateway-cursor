@@ -12,8 +12,5 @@ if (h.ok) {
   process.exit(0);
 }
 log(`secure-llm-gateway: NOT reachable at ${BASE_URL} — refusing to proceed (fail-closed)`);
-if (BASE_URL.startsWith("https://")) {
-  log("Remote gateway: check Render deploy, cold start, and GATEWAY_MCP_TOKEN for MCP.");
-}
 // Exit 2 so Cursor hooks with failClosed treat this as an explicit deny (not fail-open).
 process.exit(2);

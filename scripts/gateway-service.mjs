@@ -15,14 +15,12 @@ import {
   HOST, PORT, BASE_URL, SERVICE_LABEL, REPO_ROOT, ENTRY, STATE_DIR, LOG_FILE,
   ensureStateDir, getOrCreateInstallId, health, waitHealthy, deepMerge, mergeHookEvents,
   readJsonSafe, writeJson, log, getJson, killPortListener, MCP_SERVER_NAME,
-  stripClaudeGatewayHooks, writeGatewayEnv, syncMacGuiEnv, ENV_FILE,
+  stripClaudeGatewayHooks,
 } from "./lib.mjs";
 
 const PID_FILE = path.join(STATE_DIR, "gateway.pid");
 const CLAUDE_HOOK = path.join(REPO_ROOT, "scripts", "claude-session-hook.mjs");
-const HEALTH_CHECK = path.join(REPO_ROOT, "scripts", "health-check.mjs");
 const CURSOR_HOOK = path.join(REPO_ROOT, "scripts", "cursor-gateway-hook.mjs");
-const MCP_BRIDGE = path.join(REPO_ROOT, "scripts", "mcp-remote-bridge.mjs");
 const NODE = process.execPath;
 const NODE_ARGS = ["--experimental-strip-types", ENTRY];
 
@@ -197,67 +195,42 @@ function serviceRegistered() {
 function claudeDir() { return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"); }
 function cursorDir() { return process.env.CURSOR_CONFIG_DIR || path.join(os.homedir(), ".cursor"); }
 
-function configureClaude(opts = {}) {
-  const remoteUrl = (opts.remoteUrl || process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
-  const isRemote = remoteUrl.startsWith("http://") || remoteUrl.startsWith("https://");
-  const base = isRemote ? remoteUrl : BASE_URL;
+function configureClaude() {
+  const base = BASE_URL;
 
   const file = path.join(claudeDir(), "settings.json");
-  let cur = readJsonSafe(file);
-  if (isRemote) cur = stripClaudeGatewayHooks(cur);
+  let cur = stripClaudeGatewayHooks(readJsonSafe(file));
   cur = deepMerge(cur, { env: { ANTHROPIC_BASE_URL: base } });
 
-  const hookCmd = isRemote
-    ? `GATEWAY_PUBLIC_URL=${base} ${NODE} ${HEALTH_CHECK}`
-    : `${NODE} ${CLAUDE_HOOK}`;
   const withHooks = mergeHookEvents(cur, {
     hooks: {
-      SessionStart: [{ hooks: [{ type: "command", command: hookCmd }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: `${NODE} ${CLAUDE_HOOK}` }] }],
     },
   });
   writeJson(file, withHooks);
   log(`configured Claude Code: ${file} (ANTHROPIC_BASE_URL=${base} + SessionStart health hook)`);
 
   // MCP endpoint (best-effort; ~/.claude.json user scope is managed by the CLI).
-  // Remote uses the stdio bridge so the token stays in ~/.secure-llm-gateway/.env
-  // (HTTP + header auth fails when Claude doesn't inject the token).
+  // Loopback Streamable HTTP — no auth needed on 127.0.0.1.
   if (!process.env.CLAUDE_CONFIG_DIR) {
     tryExec("claude", ["mcp", "remove", MCP_SERVER_NAME, "-s", "user"]);
-    let addArgs;
-    if (isRemote) {
-      addArgs = [
-        "mcp", "add", "-s", "user", "-t", "stdio", MCP_SERVER_NAME,
-        "--", NODE, MCP_BRIDGE,
-      ];
-    } else {
-      addArgs = ["mcp", "add", "-s", "user", "-t", "http", MCP_SERVER_NAME, `${base}/mcp`];
-    }
+    const addArgs = ["mcp", "add", "-s", "user", "-t", "http", MCP_SERVER_NAME, `${base}/mcp`];
     if (tryExec("claude", addArgs)) {
-      log(
-        isRemote
-          ? `registered Claude MCP (user scope): stdio bridge → ${base}/mcp`
-          : `registered Claude MCP (user scope): ${base}/mcp`,
-      );
-    } else if (isRemote) {
-      log(`NOTE: register MCP manually:`);
-      log(`  claude mcp add -s user -t stdio ${MCP_SERVER_NAME} -- ${NODE} ${MCP_BRIDGE}`);
+      log(`registered Claude MCP (user scope): ${base}/mcp`);
     } else {
       log(`NOTE: register MCP manually: claude mcp add --scope user --transport http ${MCP_SERVER_NAME} ${base}/mcp`);
     }
   }
 }
 
-function configureCursor(opts = {}) {
-  const remoteUrl = (opts.remoteUrl || process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
-  const isRemote = remoteUrl.startsWith("http://") || remoteUrl.startsWith("https://");
-  const base = isRemote ? remoteUrl : BASE_URL;
+function configureCursor() {
+  const base = BASE_URL;
 
-  const mcpEntry = isRemote
-    ? { command: NODE, args: [MCP_BRIDGE] }
-    : { type: "http", url: `${base}/mcp` };
+  // Native Streamable HTTP to loopback (no auth).
+  const mcpEntry = { type: "http", url: `${base}/mcp` };
 
-  const hookPrefix = isRemote ? `GATEWAY_PUBLIC_URL=${base} ` : "";
-  const hook = `${hookPrefix}${NODE} ${CURSOR_HOOK}`;
+  // Absolute node+script only — no `VAR=value` prefix (breaks non-shell spawn).
+  const hook = `${NODE} ${CURSOR_HOOK}`;
 
   const mcpFile = path.join(cursorDir(), "mcp.json");
   writeJson(mcpFile, deepMerge(readJsonSafe(mcpFile), {
@@ -265,20 +238,17 @@ function configureCursor(opts = {}) {
   }));
 
   const hooksFile = path.join(cursorDir(), "hooks.json");
+  // No matcher: Cursor may label the server `user-secure-gateway`; the hook
+  // script filters to our gateway and allows every other MCP through.
   writeJson(hooksFile, {
     version: 1,
     hooks: {
       sessionStart: [{ command: hook, failClosed: true }],
-      beforeMCPExecution: [{ command: hook, failClosed: true, matcher: MCP_SERVER_NAME }],
+      beforeMCPExecution: [{ command: hook, failClosed: true }],
     },
   });
 
-  if (isRemote) {
-    log(`configured Cursor (remote): ${mcpFile} → stdio bridge → ${base}/mcp`);
-    log(`token loaded from ${ENV_FILE} — restart Cursor`);
-  } else {
-    log(`configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution, fail-closed)`);
-  }
+  log(`configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution, fail-closed)`);
 }
 
 function configureClients() {
@@ -352,41 +322,8 @@ async function main() {
     case "status": process.exit(await status());
     case "doctor": process.exit(await doctor());
     case "configure-clients": configureClients(); process.exit(0);
-    case "configure-cursor": {
-      const idx = process.argv.indexOf("--remote-url");
-      const urlArg = idx >= 0 ? process.argv[idx + 1] : undefined;
-      configureCursor({ remoteUrl: urlArg || process.env.GATEWAY_PUBLIC_URL });
-      process.exit(0);
-    }
-    case "configure-claude": {
-      const idx = process.argv.indexOf("--remote-url");
-      const urlArg = idx >= 0 ? process.argv[idx + 1] : undefined;
-      configureClaude({ remoteUrl: urlArg || process.env.GATEWAY_PUBLIC_URL });
-      process.exit(0);
-    }
-    case "init-env": {
-      const tokenIdx = process.argv.indexOf("--token");
-      const urlIdx = process.argv.indexOf("--remote-url");
-      const token = tokenIdx >= 0 ? process.argv[tokenIdx + 1] : process.env.GATEWAY_MCP_TOKEN;
-      const remoteUrl = (urlIdx >= 0 ? process.argv[urlIdx + 1] : process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
-      if (!token) {
-        log("usage: init-env --token TOKEN [--remote-url https://….onrender.com]");
-        log("  writes ~/.secure-llm-gateway/.env (mode 600), syncs macOS GUI env, strips hardcoded tokens from client configs");
-        process.exit(2);
-      }
-      const vars = { GATEWAY_MCP_TOKEN: token };
-      if (remoteUrl.startsWith("http")) vars.GATEWAY_PUBLIC_URL = remoteUrl;
-      writeGatewayEnv(vars);
-      for (const [k, v] of Object.entries(vars)) process.env[k] = v;
-      syncMacGuiEnv();
-      if (remoteUrl.startsWith("http")) {
-        configureCursor({ remoteUrl });
-        configureClaude({ remoteUrl });
-      }
-      log(`secrets stored in ${ENV_FILE} (mode 600)`);
-      log("Restart Cursor and Claude Code so ${env:GATEWAY_MCP_TOKEN} resolves from the GUI env");
-      process.exit(0);
-    }
+    case "configure-cursor": configureCursor(); process.exit(0);
+    case "configure-claude": configureClaude(); process.exit(0);
     case "install": {
       if (!nodeAvailable()) { log("node or gateway entry not found — aborting"); process.exit(1); }
       const id = getOrCreateInstallId();
@@ -403,7 +340,7 @@ async function main() {
       log("NOTE: ~/.claude and ~/.cursor hooks were not removed — run configure-clients after reinstall or edit manually.");
       process.exit(0);
     default:
-      log(`unknown command "${cmd}". Use: install|uninstall|start|stop|restart|status|doctor|configure-clients|configure-claude|configure-cursor|init-env [--token TOKEN] [--remote-url URL]`);
+      log(`unknown command "${cmd}". Use: install|uninstall|start|stop|restart|status|doctor|configure-clients|configure-claude|configure-cursor`);
       process.exit(2);
   }
 }

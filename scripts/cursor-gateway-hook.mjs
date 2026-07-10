@@ -29,6 +29,25 @@ function hookServerName(ctx) {
   return typeof raw === "string" ? raw : "";
 }
 
+/** True when this hook invocation is about our gateway (or sessionStart). */
+function isOurGatewayCall(ctx) {
+  const server = hookServerName(ctx).toLowerCase();
+  if (server) {
+    return (
+      server === MCP_SERVER_NAME ||
+      server === `user-${MCP_SERVER_NAME}` ||
+      server.endsWith(`-${MCP_SERVER_NAME}`) ||
+      server.includes("secure-gateway")
+    );
+  }
+  const cmd = String(ctx.command ?? "");
+  const url = String(ctx.url ?? "");
+  if (cmd.includes(MCP_SERVER_NAME)) return true;
+  if (url.includes("/mcp") && url.includes("127.0.0.1")) return true;
+  // sessionStart (and similar) — no MCP identity fields.
+  return !ctx.tool_name && !cmd && !url;
+}
+
 // Drain stdin (Cursor sends hook context JSON); hang if we don't consume it.
 let stdinJson = "";
 await new Promise((resolve) => {
@@ -49,8 +68,7 @@ try {
 } catch { /* non-json hook context */ }
 
 // beforeMCPExecution: only gate our MCP server — leave other MCP servers alone.
-const server = hookServerName(ctx);
-if (server && server !== MCP_SERVER_NAME) {
+if (!isOurGatewayCall(ctx)) {
   process.stdout.write(JSON.stringify({ permission: "allow" }) + "\n");
   process.exit(0);
 }
@@ -62,14 +80,11 @@ if (h.ok) {
   process.exit(0);
 }
 
-const isRemote = BASE_URL.startsWith("https://");
 log(`secure-llm-gateway: NOT reachable at ${BASE_URL} — refusing to proceed (fail-closed)`);
 process.stdout.write(
   JSON.stringify({
     permission: "deny",
-    user_message: isRemote
-      ? `Secure LLM Gateway is not reachable at ${BASE_URL}. Check Render deploy and GATEWAY_MCP_TOKEN.`
-      : `Secure LLM Gateway is not running at ${BASE_URL}. Start it with: node ${GATEWAY_SERVICE} start`,
+    user_message: `Secure LLM Gateway is not running at ${BASE_URL}. Start it with: node ${GATEWAY_SERVICE} start`,
     agent_message: "The PII gateway is down. Do not call upstream LLM APIs directly.",
   }) + "\n",
 );

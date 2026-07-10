@@ -9,6 +9,35 @@ short version for AI coding tools.
 
 ---
 
+## 0. Quickstart — one command
+
+There is **nothing to `npm install`** to run this: the gateway is zero-runtime-dependency
+(Node ≥ 22 built-ins only). One command bootstraps the whole thing — service, global
+Claude Code config, and Cursor config:
+
+```bash
+cd /path/to/MCP-PROXY
+node scripts/gateway-service.mjs install
+```
+
+`install` is idempotent and does, in order (`gateway-service.mjs` `install` case):
+
+1. verifies Node + the gateway entry are present;
+2. registers the per-user background service (launchd / systemd `--user` / Scheduled Task);
+3. runs `configure-clients` — writes **global** `~/.claude/settings.json`
+   (`ANTHROPIC_BASE_URL=http://127.0.0.1:8000` + `SessionStart` health hook + registers the
+   `secure-gateway` MCP server at user scope) **and** `~/.cursor/mcp.json` +
+   `~/.cursor/hooks.json` (shared MCP + fail-closed `sessionStart`/`beforeMCPExecution`);
+4. starts the gateway **fail-closed** (non-zero exit if `/healthz` never comes up).
+
+Then **restart Claude Code and Cursor** so they load the new env, MCP, and session hooks.
+Verify anytime with `node scripts/gateway-service.mjs doctor` (11 checks, all should be `[OK]`).
+
+> The only optional `npm install` is **dev-only** (`typescript`, `@types/node`) and just for
+> `npm run build`. It is not needed to run, test, or use the gateway.
+
+---
+
 ## 1. Prerequisites
 
 - **Node ≥ 22** (developed on v24). Check: `node --version`.
@@ -100,7 +129,7 @@ tests/
 
 ### Commands
 ```bash
-npm test                     # full suite (76 tests)
+npm test                     # full suite (81 tests, 13 phase files)
 npm run dev                  # run gateway from source
 node --experimental-strip-types --test tests/phase-a1.test.ts   # one file
 ```
@@ -235,106 +264,31 @@ make a user-controlled admin account non-bypassable.
 
 ---
 
-## Remote deploy (Render / cloud)
+## Networking model — loopback only
 
-Local mode (default) binds **127.0.0.1 only**. Cloud mode is opt-in via `GATEWAY_REMOTE=1`.
-
-### 1. Deploy to Render
-
-1. Push this repo to GitHub.
-2. Create a **Web Service** on Render from the repo (Blueprint uses `render.yaml`).
-3. In Render **Environment**, set **`GATEWAY_ADMIN_TOKEN`** (required). Blueprint can
-   auto-generate it via `generateValue: true` in `render.yaml`.
-4. Confirm logs show `listening on http://0.0.0.0:…` — **not** `127.0.0.1`. If you see
-   `127.0.0.1`, redeploy after pulling the latest code (Render auto-sets `RENDER=true`
-   which now triggers `0.0.0.0` bind).
-5. Note the public URL, e.g. `https://secure-llm-gateway-xxxx.onrender.com`.
-6. Open the console with your admin token (remote mode blocks unauthenticated reads):
-   `https://YOUR-SERVICE.onrender.com/?token=YOUR_GATEWAY_ADMIN_TOKEN`
-   Or paste the token in the **unlock** field on the dashboard header.
-
-Required env on Render:
-
-| Var | Value |
-|---|---|
-| `GATEWAY_REMOTE` | `1` |
-| `GATEWAY_HOST` | `0.0.0.0` |
-| `GATEWAY_ADMIN_TOKEN` | strong random secret |
-| `PORT` | set automatically by Render |
-
-### 2. Configure Cursor on your Mac
-
-Store secrets outside git (recommended):
-
-```bash
-cd /path/to/MCP-PROXY
-node scripts/gateway-service.mjs init-env \
-  --token "<same as Render GATEWAY_ADMIN_TOKEN>" \
-  --remote-url https://YOUR-SERVICE.onrender.com
-```
-
-This writes **`~/.secure-llm-gateway/.env`** (mode `600`) and configures Cursor + Claude
-to use a **stdio MCP bridge** (`scripts/mcp-remote-bridge.mjs`) that reads the token
-from that file — no `${env:…}` in `mcp.json` (GUI apps on macOS don't inherit shell env).
-
-Or configure clients manually after exporting the token:
-
-```bash
-export GATEWAY_MCP_TOKEN="<same as Render GATEWAY_ADMIN_TOKEN>"
-node scripts/gateway-service.mjs configure-cursor --remote-url https://YOUR-SERVICE.onrender.com
-```
-
-Restart Cursor. The hook health-checks the remote URL; MCP calls send
-`x-gateway-token` via `${env:GATEWAY_MCP_TOKEN}`.
-
-Add to `~/.zshrc` so terminals and hooks see the token:
-
-```bash
-[ -f ~/.secure-llm-gateway/.env ] && set -a && . ~/.secure-llm-gateway/.env && set +a
-```
-
-### 3. Configure Claude Code (same remote gateway)
-
-After `init-env` (above), Claude is configured automatically. Or manually:
-
-```bash
-export GATEWAY_MCP_TOKEN="<same as Render GATEWAY_ADMIN_TOKEN>"
-node scripts/gateway-service.mjs configure-claude --remote-url https://YOUR-SERVICE.onrender.com
-```
-
-This sets `ANTHROPIC_BASE_URL` to the Render URL (Claude API traffic is proxied
-and redacted), registers `secure-gateway` MCP as a **stdio bridge** (same as
-Cursor — token stays in `~/.secure-llm-gateway/.env`), and uses a remote
-SessionStart health hook (no local gateway start).
-
-Restart Claude Code (`/exit`, then reopen). Your Anthropic API key stays in
-Claude's normal auth — the gateway only proxies and redacts.
-
-If `/mcp` still fails, confirm user-scope MCP:
-
-```bash
-claude mcp list
-# secure-gateway should be stdio → mcp-remote-bridge.mjs
-```
-
-### 4. What works remotely
+The gateway binds **`127.0.0.1:8000`** and nothing else. `loadConfig` refuses any
+non-loopback `GATEWAY_HOST`, so there is no cloud/remote deploy mode: PII never
+transits a third party. Clients connect over loopback:
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `/healthz` | Public | Health checks (hooks, Render) |
-| `/mcp` | `x-gateway-token` or `Authorization: Bearer` | Cursor MCP (`get_traffic_logs`) |
+| `/healthz` | Public (loopback) | Health checks (hooks) |
+| `/mcp` | Loopback Origin | Cursor/Claude MCP (`get_traffic_logs`) |
 | `/anthropic/*`, `/openai/*`, … | Provider API keys from client headers | LLM proxy (data plane) |
-| `/logs`, `/api/*` | Admin token | Control plane |
+| `/logs`, `/api/*` | Loopback Origin (or `GATEWAY_ADMIN_TOKEN` for cross-origin) | Control plane |
 
-**Note:** The LLM proxy on Render redacts traffic but **PII still transits the cloud**.
-For strict local-only redaction, keep the gateway on loopback. Remote mode is for
-trying MCP observability + shared team access, not maximum privacy.
+Configure both clients with `node scripts/gateway-service.mjs configure-clients`
+(or `configure-cursor` / `configure-claude` individually).
 
-### 4. Local vs remote quick reference
+**Known caveat — Cursor `mcp.json` migration.** `configure-cursor` deep-merges into any
+existing `secure-gateway` entry. If a repo/user still has the **old stdio** entry (a
+`command`/`args` pair pointing at the removed `mcp-remote-bridge.mjs`), the merge layers the
+new `type: http` + `url` on top but leaves the dead `command`/`args` behind. The correct
+shape for the loopback HTTP transport is just:
 
-| | Local (default) | Remote (Render) |
-|---|---|---|
-| Bind | `127.0.0.1:8000` | `0.0.0.0:$PORT` |
-| Cursor MCP URL | `http://127.0.0.1:8000/mcp` | `https://….onrender.com/mcp` |
-| MCP auth | None | `GATEWAY_MCP_TOKEN` |
-| Configure | `configure-clients` | `configure-cursor --remote-url …` |
+```json
+{ "mcpServers": { "secure-gateway": { "type": "http", "url": "http://127.0.0.1:8000/mcp" } } }
+```
+
+Until `configure-cursor` is fixed to replace (not merge) a stale stdio entry, delete the
+leftover `command`/`args`/`envFile` keys by hand after migrating from an old install.

@@ -10,11 +10,7 @@ const NODE = process.execPath;
 const SERVICE = path.join(ROOT, "gateway-service.mjs");
 const HEALTH = path.join(ROOT, "health-check.mjs");
 
-const publicUrl = (process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
-const isRemote = publicUrl.startsWith("https://");
-
-if (!isRemote) {
-  spawnSync(NODE, [SERVICE, "start"], { stdio: "inherit", env: process.env });
-}
+// Loopback-only: always ensure the local gateway is up, then probe fail-closed.
+spawnSync(NODE, [SERVICE, "start"], { stdio: "inherit", env: process.env });
 const probe = spawnSync(NODE, [HEALTH], { stdio: "inherit", env: process.env });
 process.exit(typeof probe.status === "number" ? probe.status : 2);

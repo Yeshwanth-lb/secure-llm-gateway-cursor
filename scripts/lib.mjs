@@ -19,7 +19,7 @@ export const ENV_FILE = path.join(STATE_DIR, ".env");
 export const LOG_FILE = path.join(STATE_DIR, "gateway.log");
 export const INSTALL_ID_FILE = path.join(STATE_DIR, "install-id");
 
-/** Parse KEY=VALUE lines into process.env (never overrides existing vars). */
+/** Parse KEY=VALUE lines into process.env (never overrides an already-set var). */
 function parseEnvLines(body) {
   for (const line of body.split("\n")) {
     const t = line.trim();
@@ -42,19 +42,20 @@ function parseEnvLines(body) {
 /** Load ~/.secure-llm-gateway/.env then repo .env (if present). Runs once at import. */
 function bootstrapEnv() {
   if (process.env.GATEWAY_ENV_BOOTSTRAPPED === "1") return;
-  for (const file of [ENV_FILE, path.join(REPO_ROOT, ".env")]) {
-    try {
-      parseEnvLines(fs.readFileSync(file, "utf8"));
-    } catch { /* missing env file is fine */ }
-  }
+  try {
+    parseEnvLines(fs.readFileSync(ENV_FILE, "utf8"));
+  } catch { /* missing env file is fine */ }
+  try {
+    parseEnvLines(fs.readFileSync(path.join(REPO_ROOT, ".env"), "utf8"));
+  } catch { /* missing env file is fine */ }
   process.env.GATEWAY_ENV_BOOTSTRAPPED = "1";
 }
 bootstrapEnv();
 
 export const HOST = process.env.GATEWAY_HOST || "127.0.0.1";
-export const PORT = Number(process.env.PORT || process.env.GATEWAY_PORT || 8000);
-/** Public URL clients use (hooks, MCP). Falls back to loopback host:port. */
-export const BASE_URL = (process.env.GATEWAY_PUBLIC_URL || `http://${HOST}:${PORT}`).replace(/\/$/, "");
+export const PORT = Number(process.env.GATEWAY_PORT || 8000);
+/** Loopback URL clients use for hooks + MCP. Always 127.0.0.1 — loopback-only. */
+export const BASE_URL = `http://${HOST}:${PORT}`;
 export const SERVICE_LABEL = "tech.skylo.secure-llm-gateway";
 export const MCP_SERVER_NAME = "secure-gateway";
 
@@ -245,41 +246,3 @@ export function stripClaudeGatewayHooks(settings) {
   return out;
 }
 
-/** Merge vars into ~/.secure-llm-gateway/.env (mode 600). Never logs values. */
-export function writeGatewayEnv(vars) {
-  ensureStateDir();
-  const existing = {};
-  try {
-    const body = fs.readFileSync(ENV_FILE, "utf8");
-    for (const line of body.split("\n")) {
-      const t = line.trim();
-      if (!t || t.startsWith("#")) continue;
-      const eq = t.indexOf("=");
-      if (eq <= 0) continue;
-      existing[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
-    }
-  } catch { /* new file */ }
-  for (const [k, v] of Object.entries(vars)) {
-    if (v !== undefined && v !== null && String(v).length > 0) existing[k] = String(v);
-  }
-  const lines = [
-    "# Secure LLM Gateway — local secrets (never commit)",
-    ...Object.entries(existing).map(([k, v]) => `${k}=${v}`),
-  ];
-  fs.writeFileSync(ENV_FILE, lines.join("\n") + "\n", { mode: 0o600 });
-  try {
-    fs.chmodSync(ENV_FILE, 0o600);
-  } catch { /* ignore */ }
-}
-
-/** Push token/public URL into macOS GUI session (Cursor) via launchctl. */
-export function syncMacGuiEnv() {
-  if (process.platform !== "darwin") return;
-  for (const key of ["GATEWAY_MCP_TOKEN", "GATEWAY_PUBLIC_URL"]) {
-    const val = process.env[key];
-    if (!val) continue;
-    try {
-      execFileSync("launchctl", ["setenv", key, val], { stdio: "ignore" });
-    } catch { /* ignore */ }
-  }
-}

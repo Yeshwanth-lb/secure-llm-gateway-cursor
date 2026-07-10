@@ -71,6 +71,25 @@ test("extra: header tier beats heuristic; gemini heuristic; x-llm-upstream overr
   assert.equal(ovr!.upstreamBase, "http://127.0.0.1:9101");
 });
 
+// --- EDGE: Enterprise OAuth Bearer on /v1/models routes to anthropic ---------
+test("edge: OAuth Bearer on /v1/models sniffs to anthropic", () => {
+  const r = resolveRoute(
+    fakeReq("/v1/models", { authorization: "Bearer oauth-session-token" }),
+    UPSTREAMS,
+  );
+  assert.ok(r, "OAuth-shaped Bearer on /v1/* yields anthropic");
+  assert.equal(r!.provider, "anthropic");
+});
+
+// --- extra: x-llm-upstream ignored unless allowUpstreamOverride -------------
+test("extra: x-llm-upstream ignored by default", () => {
+  const r = resolveRoute(
+    fakeReq("/openai/v1/chat/completions", { "x-llm-upstream": "http://127.0.0.1:9101" }),
+    UPSTREAMS,
+  );
+  assert.equal(r!.upstreamBase, "https://openai.test");
+});
+
 // --- extra: header forwarding strips hop-by-hop, forces identity, keeps auth ---
 test("extra: buildForwardHeaders drops hop-by-hop, forces identity, preserves auth", () => {
   const req = fakeReq("/openai/v1/chat/completions", {

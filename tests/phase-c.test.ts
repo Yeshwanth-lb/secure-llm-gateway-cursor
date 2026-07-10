@@ -349,99 +349,16 @@ test("hardening/edge: zero-length custom regex does not infinite-loop", () => {
   }
 });
 
-test("hardening/edge: RENDER=true auto-binds 0.0.0.0 with admin token", () => {
-  const prev = {
-    r: process.env.RENDER,
-    t: process.env.GATEWAY_ADMIN_TOKEN,
-    g: process.env.GATEWAY_REMOTE,
-    h: process.env.GATEWAY_HOST,
-    p: process.env.PORT,
-  };
-  process.env.RENDER = "true";
-  process.env.PORT = "10000";
-  process.env.GATEWAY_ADMIN_TOKEN = "render-token";
-  delete process.env.GATEWAY_REMOTE;
-  delete process.env.GATEWAY_HOST;
-  try {
-    const cfg = loadConfig();
-    assert.equal(cfg.host, "0.0.0.0");
-    assert.equal(cfg.port, 10000);
-    assert.equal(cfg.remoteMode, true);
-  } finally {
-    if (prev.r === undefined) delete process.env.RENDER;
-    else process.env.RENDER = prev.r;
-    if (prev.t === undefined) delete process.env.GATEWAY_ADMIN_TOKEN;
-    else process.env.GATEWAY_ADMIN_TOKEN = prev.t;
-    if (prev.g === undefined) delete process.env.GATEWAY_REMOTE;
-    else process.env.GATEWAY_REMOTE = prev.g;
-    if (prev.h === undefined) delete process.env.GATEWAY_HOST;
-    else process.env.GATEWAY_HOST = prev.h;
-    if (prev.p === undefined) delete process.env.PORT;
-    else process.env.PORT = prev.p;
-  }
-});
-
-// EDGE — remote mode allows 0.0.0.0 bind when admin token is set.
-test("hardening/edge: GATEWAY_REMOTE=1 allows 0.0.0.0 with admin token", () => {
-  const prev = { r: process.env.GATEWAY_REMOTE, t: process.env.GATEWAY_ADMIN_TOKEN, h: process.env.GATEWAY_HOST };
-  process.env.GATEWAY_REMOTE = "1";
-  process.env.GATEWAY_ADMIN_TOKEN = "test-remote-token";
+// EDGE — loopback-only: a non-loopback host is refused at config load (no cloud mode).
+test("hardening/edge: loadConfig refuses a non-loopback host", () => {
+  const prev = process.env.GATEWAY_HOST;
   process.env.GATEWAY_HOST = "0.0.0.0";
   try {
-    const cfg = loadConfig();
-    assert.equal(cfg.host, "0.0.0.0");
-    assert.equal(cfg.remoteMode, true);
+    assert.throws(() => loadConfig(), /loopback-only/);
+    assert.throws(() => loadConfig({ host: "10.0.0.5" }), /loopback-only/);
   } finally {
-    if (prev.r === undefined) delete process.env.GATEWAY_REMOTE;
-    else process.env.GATEWAY_REMOTE = prev.r;
-    if (prev.t === undefined) delete process.env.GATEWAY_ADMIN_TOKEN;
-    else process.env.GATEWAY_ADMIN_TOKEN = prev.t;
-    if (prev.h === undefined) delete process.env.GATEWAY_HOST;
-    else process.env.GATEWAY_HOST = prev.h;
-  }
-});
-
-test("hardening/edge: remote MCP requires admin token", async () => {
-  const server = createGatewayServer({ remoteMode: true, adminToken: "remote-secret" });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  try {
-    const denied = await fetch(`${base}/mcp`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    });
-    assert.equal(denied.status, 401);
-
-    const ok = await fetch(`${base}/mcp`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-gateway-token": "remote-secret" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    });
-    assert.equal(ok.status, 200);
-  } finally {
-    server.closeAllConnections?.();
-    await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
-  }
-});
-
-test("hardening/edge: remote console /api/state requires token then returns rules", async () => {
-  const server = createGatewayServer({ remoteMode: true, adminToken: "remote-secret" });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  try {
-    const denied = await fetch(`${base}/api/state`);
-    assert.equal(denied.status, 401);
-
-    const ok = await fetch(`${base}/api/state`, {
-      headers: { "x-gateway-token": "remote-secret" },
-    });
-    assert.equal(ok.status, 200);
-    const st = (await ok.json()) as { rules: unknown[] };
-    assert.ok(st.rules.length >= 10, "default rules should be listed");
-  } finally {
-    server.closeAllConnections?.();
-    await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
+    if (prev === undefined) delete process.env.GATEWAY_HOST;
+    else process.env.GATEWAY_HOST = prev;
   }
 });
 

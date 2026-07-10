@@ -49,7 +49,7 @@ happy/failure/edge test target for each phase.
 
 ## Before you finish any change
 
-- Full suite green (`npm test`, currently 76 tests), no new runtime dependency, no raw PII anywhere, ledger updated.
+- Full suite green (`npm test`, currently 81 tests across 13 phase files), no new runtime dependency, no raw PII anywhere, ledger updated.
 - After changing redaction rules or gateway code, document `restart --force` in DEVELOPERS.md if lifecycle behavior changed.
 - Commit messages end with:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`

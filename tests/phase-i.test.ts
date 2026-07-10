@@ -1,7 +1,6 @@
 // ===== PHASE I — CROSS-PLATFORM SHARED-INSTANCE INTEGRATION ==================
-// Exactly three E2E tests (plan §7): happy (shared-log aggregation across
-// Claude- and Cursor/OpenAI-shaped traffic + MCP), failure (fail-closed health
-// hook), edge (concurrent start -> one listener/identity + one combined log).
+// Core E2E trio (plan §7): happy / failure / edge concurrent start.
+// Additional config + hook tests for local (loopback) Cursor/Claude wiring.
 // Ephemeral ports + local fake upstream only; never contacts real providers and
 // never mutates real user Claude/Cursor config (temp dirs).
 
@@ -71,13 +70,15 @@ test("happy: Claude + Cursor/OpenAI traffic aggregate in one redacted log via MC
 // --- FAILURE: health hook is fail-closed when the gateway is unavailable -------
 test("failure: health-check hook exits non-zero against a dead gateway (no bypass)", async () => {
   const dead = await freePort(); // nothing listening
-  const { code, stderr } = await runNode(HEALTH, { GATEWAY_PORT: String(dead) });
+  const { code, stderr } = await runNode(HEALTH, {
+    GATEWAY_PORT: String(dead),
+    GATEWAY_ENV_BOOTSTRAPPED: "1",
+  });
   assert.equal(code, 2, "hook fails closed (exit 2) so the session refuses to proceed");
   assert.match(stderr, /NOT reachable|refusing/i, "states unavailability, never claims readiness");
   assert.doesNotMatch(stderr, /a@corp\.com|api[_-]?key/i, "no secrets/PII in hook output");
 });
 
-// --- CONFIG: configure-clients writes correct Cursor hook shape ----------------
 test("config: configure-clients writes Cursor MCP + fail-closed session hooks only", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-cfg-"));
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
@@ -85,18 +86,21 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
     CURSOR_CONFIG_DIR: tmp,
     CLAUDE_CONFIG_DIR: path.join(tmp, "claude"),
     GATEWAY_STATE_DIR: state,
+    GATEWAY_ENV_BOOTSTRAPPED: "1",
   };
   try {
     const { code } = await runNode(SERVICE, env, "configure-clients");
     assert.equal(code, 0);
     const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
     const hooks = JSON.parse(fs.readFileSync(path.join(tmp, "hooks.json"), "utf8"));
+    assert.equal(mcp.mcpServers["secure-gateway"].type, "http");
     assert.equal(mcp.mcpServers["secure-gateway"].url, "http://127.0.0.1:8000/mcp");
     assert.ok(hooks.hooks.sessionStart?.[0]?.failClosed, "sessionStart is fail-closed");
     assert.ok(hooks.hooks.beforeMCPExecution?.[0]?.failClosed, "beforeMCP is fail-closed");
     assert.equal(hooks.hooks.preToolUse, undefined, "no per-tool health hook");
     assert.match(hooks.hooks.sessionStart[0].command, /cursor-gateway-hook\.mjs/);
-    assert.equal(hooks.hooks.beforeMCPExecution?.[0]?.matcher, "secure-gateway");
+    assert.doesNotMatch(hooks.hooks.sessionStart[0].command, /^GATEWAY_PUBLIC_URL=/, "no shell env prefix");
+    assert.equal(hooks.hooks.beforeMCPExecution?.[0]?.matcher, undefined, "filter in-script (user- prefix)");
     assert.ok(fs.existsSync(CURSOR_HOOK), "cursor hook script exists");
 
     const claude = JSON.parse(fs.readFileSync(path.join(tmp, "claude", "settings.json"), "utf8"));
@@ -106,95 +110,48 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
     fs.rmSync(state, { recursive: true, force: true });
   }
 });
-test("config: init-env writes ~/.secure-llm-gateway/.env and env-ref mcp header", async () => {
-  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-env-"));
-  const cursor = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-env-"));
-  const claude = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "claude-env-")), "claude");
-  const remote = "https://secure-gateway.example.onrender.com";
-  const env = { GATEWAY_STATE_DIR: state, CURSOR_CONFIG_DIR: cursor, CLAUDE_CONFIG_DIR: claude };
-  try {
-    const { code } = await runNode(
-      SERVICE,
-      env,
-      "init-env",
-      "--token",
-      "secret-token",
-      "--remote-url",
-      remote,
-    );
-    assert.equal(code, 0);
-    const body = fs.readFileSync(path.join(state, ".env"), "utf8");
-    assert.match(body, /GATEWAY_MCP_TOKEN=secret-token/);
-    assert.match(body, /GATEWAY_PUBLIC_URL=https:\/\/secure-gateway\.example\.onrender\.com/);
-    const mode = fs.statSync(path.join(state, ".env")).mode & 0o777;
-    assert.equal(mode, 0o600);
-    const mcp = JSON.parse(fs.readFileSync(path.join(cursor, "mcp.json"), "utf8"));
-    assert.equal(mcp.mcpServers["secure-gateway"].command, process.execPath);
-    assert.match(mcp.mcpServers["secure-gateway"].args[0], /mcp-remote-bridge\.mjs$/);
-    assert.doesNotMatch(JSON.stringify(mcp), /secret-token/, "token must not appear in client config");
-  } finally {
-    fs.rmSync(state, { recursive: true, force: true });
-    fs.rmSync(cursor, { recursive: true, force: true });
-    fs.rmSync(path.dirname(claude), { recursive: true, force: true });
-  }
-});
-
-// --- CONFIG: configure-claude --remote-url sets Anthropic base + remote health hook -
-test("config: configure-claude --remote-url sets ANTHROPIC_BASE_URL + remote health hook", async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claude-remote-"));
-  const remote = "https://secure-gateway.example.onrender.com";
-  const env = {
-    CLAUDE_CONFIG_DIR: path.join(tmp, "claude"),
-    GATEWAY_STATE_DIR: path.join(tmp, "state"),
-    GATEWAY_MCP_TOKEN: "test-token",
-  };
-  try {
-    const { code } = await runNode(SERVICE, env, "configure-claude", "--remote-url", remote);
-    assert.equal(code, 0);
-    const claude = JSON.parse(fs.readFileSync(path.join(tmp, "claude", "settings.json"), "utf8"));
-    assert.equal(claude.env.ANTHROPIC_BASE_URL, remote);
-    const cmd = claude.hooks.SessionStart?.[0]?.hooks?.[0]?.command ?? "";
-    assert.match(cmd, /GATEWAY_PUBLIC_URL=https:\/\/secure-gateway\.example\.onrender\.com/);
-    assert.match(cmd, /health-check\.mjs/);
-    assert.doesNotMatch(cmd, /claude-session-hook\.mjs/, "remote skips local gateway start");
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-// --- CONFIG: configure-cursor --remote-url writes stdio bridge + remote hooks ----
-test("config: configure-cursor --remote-url writes stdio bridge + remote hooks", async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-remote-"));
-  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-cursor-"));
-  const remote = "https://secure-gateway.example.onrender.com";
-  const env = { CURSOR_CONFIG_DIR: tmp, GATEWAY_STATE_DIR: state, GATEWAY_PUBLIC_URL: remote };
-  try {
-    const { code } = await runNode(SERVICE, env, "configure-cursor", "--remote-url", remote);
-    assert.equal(code, 0);
-    const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
-    const hooks = JSON.parse(fs.readFileSync(path.join(tmp, "hooks.json"), "utf8"));
-    assert.equal(mcp.mcpServers["secure-gateway"].command, process.execPath);
-    assert.match(mcp.mcpServers["secure-gateway"].args[0], /mcp-remote-bridge\.mjs$/);
-    assert.equal(mcp.mcpServers["secure-gateway"].url, undefined);
-    assert.match(hooks.hooks.sessionStart[0].command, /GATEWAY_PUBLIC_URL=https/);
-    assert.equal(hooks.hooks.beforeMCPExecution[0].matcher, "secure-gateway");
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.rmSync(state, { recursive: true, force: true });
-  }
-});
-
 // --- HOOK: beforeMCPExecution skips non-secure-gateway servers -----------------
 test("hook: beforeMCPExecution allows non-secure-gateway MCP without health probe", async () => {
   const dead = await freePort();
   const { code, stdout } = await runNodeWithStdin(
     CURSOR_HOOK,
-    { GATEWAY_PORT: String(dead), GATEWAY_PUBLIC_URL: `http://127.0.0.1:${dead}` },
+    { GATEWAY_PORT: String(dead) },
     JSON.stringify({ server: "some-other-mcp" }),
   );
   assert.equal(code, 0);
   const out = JSON.parse(stdout.trim());
   assert.equal(out.permission, "allow");
+});
+
+test("hook: beforeMCPExecution treats user-secure-gateway as ours", async () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-hook-user-"));
+  const installId = "test-cursor-user-prefix";
+  fs.writeFileSync(path.join(state, "install-id"), installId + "\n");
+  const upstream = await startFakeUpstream();
+  const server = createGatewayServer({
+    installId,
+    upstreams: { openai: upstream.base, anthropic: upstream.base, gemini: upstream.base },
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const { code, stdout } = await runNodeWithStdin(
+      CURSOR_HOOK,
+      {
+        GATEWAY_PORT: String(port),
+        GATEWAY_STATE_DIR: state,
+        GATEWAY_ENV_BOOTSTRAPPED: "1",
+      },
+      JSON.stringify({ server: "user-secure-gateway" }),
+    );
+    assert.equal(code, 0);
+    assert.equal(JSON.parse(stdout.trim()).permission, "allow");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((r) => server.close(() => r()));
+    await upstream.close();
+    fs.rmSync(state, { recursive: true, force: true });
+  }
 });
 
 // --- EDGE: concurrent start -> one listener + one identity + one combined log --
@@ -206,6 +163,7 @@ test("edge: concurrent start is idempotent — single instance, one shared log",
     GATEWAY_PORT: String(port),
     GATEWAY_HOST: "127.0.0.1",
     GATEWAY_STATE_DIR: stateDir,
+    GATEWAY_ENV_BOOTSTRAPPED: "1",
     ANTHROPIC_UPSTREAM: upstream.base,
     OPENAI_COMPAT_UPSTREAM: upstream.base,
     GEMINI_UPSTREAM: upstream.base,

@@ -8,6 +8,7 @@ build/
 
 # Config secrets / local state
 config/config.local.yaml
+.claude/settings.local.json
 *.db
 *.sqlite
 *.sqlite3

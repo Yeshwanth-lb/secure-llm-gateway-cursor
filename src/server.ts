@@ -69,20 +69,8 @@ function mutationAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
   return o !== undefined && isLoopbackOrigin(o);
 }
 
-/** Bearer or x-gateway-token matching adminToken — used for remote control plane + MCP. */
-function controlTokenAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
-  const hdr = req.headers["x-gateway-token"];
-  const t = Array.isArray(hdr) ? hdr[0] : hdr;
-  if (t && t === config.adminToken) return true;
-  const auth = req.headers["authorization"];
-  const a = Array.isArray(auth) ? auth[0] : auth;
-  if (a?.startsWith("Bearer ") && a.slice(7) === config.adminToken) return true;
-  return false;
-}
-
-/** Control-plane access: loopback Origin locally; token required in remote mode. */
+/** Control-plane access: loopback Origin (or admin token from a cross-origin caller). */
 function controlPlaneAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
-  if (config.remoteMode) return controlTokenAllowed(req, config);
   return originAllowed(req, config);
 }
 
@@ -154,13 +142,11 @@ async function handleRequest(
     return;
   }
 
-  // Control plane is guarded (§5). Remote deploys require admin token on all control paths.
+  // Control plane is guarded (§5): loopback browser Origin (or admin token) only.
   const controlPath =
     path === "/logs" || path === "/rules" || isApiPath(path) || isMcpPath(path);
   if (controlPath && !controlPlaneAllowed(req, config)) {
-    sendJson(res, config.remoteMode ? 401 : 403, {
-      error: config.remoteMode ? "Unauthorized" : "Origin not allowed",
-    });
+    sendJson(res, 403, { error: "Origin not allowed" });
     return;
   }
 

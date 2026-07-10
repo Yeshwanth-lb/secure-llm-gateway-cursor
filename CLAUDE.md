@@ -190,11 +190,33 @@ A phase is **done** only when **all** of these hold:
 
 **Last updated:** 2026-07-10
 **Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅
-**Overall:** Core gateway, console, model policy, clean view, and global client integration complete. Suite 80/80 green.
+**Overall:** Core gateway, console, model policy, clean view, and global client integration complete. Suite 81/81 green.
 
-**Remote deploy (2026-07-10):** Opt-in `GATEWAY_REMOTE=1` for Render (`render.yaml`).
-Control plane + MCP require `GATEWAY_ADMIN_TOKEN`. `configure-cursor --remote-url`
-writes Cursor `mcp.json` + hooks with `${env:GATEWAY_MCP_TOKEN}`.
+**Operational bootstrap (verified 2026-07-10):** The single bootstrap command is
+`node scripts/gateway-service.mjs install` — it registers the per-user service, runs
+`configure-clients` (global `~/.claude/settings.json`: `ANTHROPIC_BASE_URL` + SessionStart
+hook + user-scope `secure-gateway` MCP; `~/.cursor/mcp.json` + `hooks.json`), and starts
+fail-closed. **No runtime deps to install** (zero-dep is a hard constraint; the only
+`npm install` is dev-only `typescript`/`@types/node` for `npm run build`). Verified live:
+gateway healthy on `127.0.0.1:8000`, `doctor` 11/11 `[OK]`, Claude+Cursor hooks present,
+outbound `EMAIL` redaction confirmed end-to-end from a real Claude Code prompt. See
+DEVELOPERS.md §0 Quickstart.
+
+**Known bug — `configure-cursor` merge (2026-07-10):** `configure-cursor` in
+`scripts/gateway-service.mjs` deep-merges into an existing `secure-gateway` entry instead
+of replacing it. Migrating from the old **stdio** entry (the removed
+`mcp-remote-bridge.mjs`) leaves stale `command`/`args`/`envFile` keys alongside the new
+`type: http` + `url`. Cleaned by hand this session; fix should write a fresh HTTP-only
+object when the prior entry is stdio-shaped. Documented in DEVELOPERS.md.
+
+**Loopback-only (2026-07-10):** All remote/cloud (Render) support was removed. The
+gateway binds `127.0.0.1` only — `loadConfig` throws on any non-loopback `GATEWAY_HOST`
+(no `GATEWAY_REMOTE`, no `0.0.0.0`, no `RENDER` detection). Deleted `render.yaml` and
+`scripts/mcp-remote-bridge.mjs`; dropped `--remote-url`/`init-env` and the
+`GATEWAY_PUBLIC_URL`/`GATEWAY_MCP_TOKEN` plumbing. Clients connect over loopback:
+Claude via `ANTHROPIC_BASE_URL=http://127.0.0.1:8000` + `http` MCP, Cursor via `http`
+MCP. Control plane is loopback-Origin gated (`GATEWAY_ADMIN_TOKEN` still allows a
+cross-origin caller).
 
 **Redaction expansion (2026-07-10):** Default rules grew beyond the original 7 to cover
 high-signal Claude-session leaks — JWT, PEM private keys, DB/URL userinfo, expanded
@@ -227,10 +249,10 @@ multi-JWT and split-stream tests.
 | B1 — Routing | ✅ Done | prefix route / no signal / ambiguous `/v1/models` sniff | ✅ 5/5 | `tests/phase-b1.test.ts`. |
 | B2 — Proxy + log | ✅ Done | bidi redaction + log / upstream down / no raw PII snapshot | ✅ 3/3 | `tests/phase-b2.test.ts`. |
 | B3 — MCP server | ✅ Done | Streamable HTTP / unknown method / stdio protocol-pure | ✅ 3/3 | `tests/phase-b3.test.ts`. |
-| C — Integration | ✅ Done | 6 acceptance criteria + hardening | ✅ 11/11 | `tests/phase-c.test.ts`. |
+| C — Integration | ✅ Done | 6 acceptance criteria + hardening (loopback-only, no cloud mode) | ✅ 12/12 | `tests/phase-c.test.ts`. |
 | D — Traffic inspector | ✅ Done | console shell + aliases + `/logs` polling | ✅ 4/4 | `tests/phase-d.test.ts`. |
 | E — Control-plane console + `/api` | ✅ Done | MCP/browser negotiation + live rules/model controls | ✅ 9/9 | Admin-token gate when `GATEWAY_ADMIN_TOKEN` set. `tests/phase-e.test.ts`. |
-| I — Cross-platform integration | ✅ Done | shared-log aggregation / fail-closed health hook / global Cursor config / concurrent start | ✅ 6/6 | Remote Cursor via `configure-cursor --remote-url`; hook skips non-secure-gateway MCP. `tests/phase-i.test.ts`. |
+| I — Cross-platform integration | ✅ Done | shared-log aggregation / fail-closed health hook / global Cursor config / concurrent start | ✅ 6/6 | Loopback-only `http` MCP for Cursor + Claude; hook skips non-secure-gateway MCP. `tests/phase-i.test.ts`. |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)
