@@ -181,7 +181,7 @@ export function handleMcpHttp(
     const msgs = (batch ? parsed : [parsed]) as JsonRpcMessage[];
     const responses = msgs.map(dispatch).filter((r): r is JsonRpcResponse => r !== null);
     const hasInit = msgs.some((m) => m && m.method === "initialize");
-    const extra = hasInit ? { "mcp-session-id": randomUUID() } : {};
+    const extra: Record<string, string> = hasInit ? { "mcp-session-id": randomUUID() } : {};
     if (responses.length === 0) {
       res.writeHead(202, extra);
       res.end();

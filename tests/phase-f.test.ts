@@ -232,3 +232,25 @@ test("proxy snapshot: log captures content far past 500 chars (system prompt vis
   assert.match(e.payloadSnapshot.request, /\[REDACTED_PII_EMAIL\]/); // still redacted
   assert.doesNotMatch(e.payloadSnapshot.request, /ops@corp\.com/);
 });
+
+// PROXY sanitize — empty text blocks are stripped before forwarding (fixes the
+// Anthropic "text content blocks must be non-empty" 400 from replayed history).
+test("proxy sanitize: empty text content blocks are removed before forwarding", async () => {
+  await proxyPost("/anthropic/v1/messages", {
+    model: "claude-x",
+    system: [{ type: "text", text: "" }, { type: "text", text: "You are helpful" }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "" }, { type: "text", text: "hello" }] },
+      { role: "assistant", content: [{ type: "text", text: "" }] }, // whole block empty
+    ],
+  });
+  const sent = JSON.parse(upstream.last()!.body);
+  // no empty text block survives anywhere
+  const flat = JSON.stringify(sent);
+  assert.doesNotMatch(flat, /"text":""/);
+  // the real user text is preserved
+  assert.equal(sent.messages[0].content.some((b: any) => b.text === "hello"), true);
+  // the all-empty assistant block became a minimal non-empty placeholder (never [])
+  assert.ok(sent.messages[1].content.length >= 1);
+  assert.ok(sent.messages[1].content[0].text.length >= 1);
+});

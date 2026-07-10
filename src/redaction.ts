@@ -22,15 +22,85 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-// 7 default rules (§3.1). Order matters only for exact-tie overlap resolution.
+/** Skip loopback IPv4 — gateway hook messages cite 127.0.0.1; redacting it breaks context. */
+function isPublicIpv4(ip: string): boolean {
+  const parts = ip.split(".").map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
+  return parts[0] !== 127;
+}
+
+/** Verhoeff checksum — kills false-positive Aadhaar matches. */
+const VERHOEFF_D = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+  [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+  [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+  [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+  [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+  [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+  [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+  [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+  [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+];
+const VERHOEFF_P = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+  [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
+  [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+  [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
+  [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+  [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
+  [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
+];
+function verhoeffValid(digits: string): boolean {
+  const d = digits.replace(/\D/g, "");
+  if (d.length !== 12) return false;
+  let c = 0;
+  for (let i = 0; i < 12; i++) {
+    const n = d.charCodeAt(11 - i) - 48;
+    if (n < 0 || n > 9) return false;
+    c = VERHOEFF_D[c][VERHOEFF_P[i % 8][n]];
+  }
+  return c === 0;
+}
+
+// Default rules. Longer / more-specific patterns first so overlap resolution
+// prefers them. Original 7 from newplan §3.1 plus high-signal Claude-session leaks.
 export const DEFAULT_RULES: RedactionRule[] = [
+  {
+    name: "PRIVATE_KEY",
+    pattern:
+      /-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----/g,
+  },
+  {
+    // header.payload.signature — header must be eyJ (JSON); payload/sig are base64url (+ optional = padding)
+    name: "JWT",
+    pattern: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}=*/g,
+  },
+  {
+    // user:pass@ in DB URLs and https basic-auth URLs
+    name: "CONN_STRING",
+    pattern:
+      /\b(?:(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp|https?):\/\/)[^:\s\/]+:[^@\s\/]+@[^\s]+/gi,
+  },
   {
     name: "API_KEY",
     pattern:
-      /\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})/g,
+      /\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-proj-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{16,}|sk_live_[A-Za-z0-9]{16,}|sk_test_[A-Za-z0-9]{16,}|pk_live_[A-Za-z0-9]{16,}|pk_test_[A-Za-z0-9]{16,}|rk_live_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]+)/g,
   },
   { name: "BEARER_TOKEN", pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/g },
   { name: "EMAIL", pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
+  {
+    // require separators or +1 / parens so bare digit runs don't match
+    name: "PHONE_US",
+    pattern:
+      /(?:\+?1[-.\s]*)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[-.\s]+\d{3}[-.\s]+\d{4}\b/g,
+  },
+  {
+    // require +91 prefix — bare 10-digit Indian mobiles are too FP-prone alone
+    name: "PHONE_IN",
+    pattern: /\+91[-.\s]*[6-9]\d{4}[-.\s]?\d{5}\b/g,
+  },
   {
     name: "CREDIT_CARD",
     pattern: /\b\d(?:[ -]?\d){12,18}\b/g,
@@ -38,9 +108,21 @@ export const DEFAULT_RULES: RedactionRule[] = [
   },
   { name: "SSN", pattern: /\b\d{3}-\d{2}-\d{4}\b/g },
   {
+    // Indian Permanent Account Number: 5 letters + 4 digits + 1 letter
+    name: "PAN_IN",
+    pattern: /\b[A-Z]{5}[0-9]{4}[A-Z]\b/g,
+  },
+  {
+    // 12-digit Aadhaar, optional spaces; Verhoeff-validated
+    name: "AADHAAR",
+    pattern: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
+    validate: verhoeffValid,
+  },
+  {
     name: "IPV4",
     pattern:
       /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
+    validate: isPublicIpv4,
   },
   {
     // require >=4 groups so wall-clock "12:34:56" doesn't match (§3.1)

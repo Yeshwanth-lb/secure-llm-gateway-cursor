@@ -139,3 +139,32 @@ test("regression: console inline script parses (no syntax error -> buttons work)
   assert.ok(m, "console has an inline script");
   assert.doesNotThrow(() => new Function(m![1]), "inline script is syntactically valid");
 });
+
+// --- FAILURE: admin token required for POST mutations when configured ---------
+test("failure: POST mutations require admin token when GATEWAY_ADMIN_TOKEN is set", async () => {
+  const admin = createGatewayServer({ adminToken: "test-admin-token" });
+  await new Promise<void>((r) => admin.listen(0, "127.0.0.1", r));
+  const adminBase = `http://127.0.0.1:${(admin.address() as AddressInfo).port}`;
+  try {
+    const denied = await fetch(`${adminBase}/api/rules/toggle`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "EMAIL", enabled: false }),
+    });
+    assert.equal(denied.status, 401);
+
+    const allowed = await fetch(`${adminBase}/api/rules/toggle`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gateway-token": "test-admin-token",
+      },
+      body: JSON.stringify({ name: "EMAIL", enabled: false }),
+    });
+    assert.equal(allowed.status, 200);
+  } finally {
+    admin.closeAllConnections?.();
+    await new Promise<void>((r, j) => admin.close((e) => (e ? j(e) : r())));
+    resetRedactionRules();
+  }
+});

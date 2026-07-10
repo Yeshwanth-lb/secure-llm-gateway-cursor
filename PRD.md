@@ -17,7 +17,7 @@ No local, transparent control point exists to scrub both directions without chan
 
 ## 2. Goal
 
-A single-file, zero-dependency local proxy that sits between any LLM client and any of three provider families, redacting PII **bidirectionally** — including PII split across streaming SSE chunk boundaries — while exposing live traffic observability via an embedded MCP server.
+A **zero-runtime-dependency** local proxy (`secure-llm-gateway.ts` + `src/` modules) that sits between any LLM client and any of three provider families, redacting PII **bidirectionally** — including PII split across streaming SSE chunk boundaries — while exposing live traffic observability via an embedded MCP server.
 
 ## 3. Non-Goals
 

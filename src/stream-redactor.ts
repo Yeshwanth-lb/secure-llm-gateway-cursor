@@ -29,6 +29,9 @@ function locateDeltaText(
     if (o.delta && typeof o.delta.text === "string") {
       return { get: () => o.delta.text, set: (v) => (o.delta.text = v) };
     }
+    if (o.delta && typeof o.delta.thinking === "string") {
+      return { get: () => o.delta.thinking, set: (v) => (o.delta.thinking = v) };
+    }
     if (o.content_block && typeof o.content_block.text === "string") {
       return { get: () => o.content_block.text, set: (v) => (o.content_block.text = v) };
     }
@@ -41,16 +44,28 @@ function locateDeltaText(
   return null;
 }
 
+/** Final end-of-message signal. NOTE: anthropic `content_block_stop` is NOT
+ *  terminal — a message with extended thinking has multiple content blocks, each
+ *  with its own stop. Treating the first (thinking) stop as terminal used to
+ *  flush prematurely and drop the answer text. Only `message_stop` ends the
+ *  stream; per-block boundaries are handled via isBlockStop(). */
 function isTerminalEvent(provider: Provider, data: string, obj: unknown): boolean {
   if (data.trim() === "[DONE]") return true;
   const o = (obj ?? {}) as Record<string, any>;
   if (provider === "openai") return o.choices?.[0]?.finish_reason != null;
-  if (provider === "anthropic") {
-    return o.type === "content_block_stop" || o.type === "message_stop";
-  }
+  if (provider === "anthropic") return o.type === "message_stop";
   if (provider === "gemini") return o.candidates?.[0]?.finishReason != null;
   return false;
 }
+
+/** Anthropic per-content-block boundary: release this block's held tail + reset. */
+function isBlockStop(provider: Provider, obj: unknown): boolean {
+  return provider === "anthropic" && (obj as any)?.type === "content_block_stop";
+}
+
+/** Hard cap on the unframed SSE tail: bounds a hostile/broken stream that never
+ *  emits an event separator, so `this.raw` can't grow without limit (§5). */
+const MAX_UNFRAMED_BYTES = 64 * 1024;
 
 export class StreamRedactor {
   readonly provider: Provider;
@@ -61,7 +76,6 @@ export class StreamRedactor {
   private textTail = ""; // withheld channel text inside the holdback window
   private lastDeltaTemplate: unknown = null; // structure to clone for synthetic flush
   private lastDeltaFields: { name: string; value: string }[] = []; // its SSE fields (event:/id:)
-  private flushed = false;
 
   constructor(provider: Provider, holdback: number) {
     this.provider = provider;
@@ -80,11 +94,20 @@ export class StreamRedactor {
       this.raw = this.raw.slice(m.index + m[0].length);
       if (eventText.trim() !== "") out += this.processEvent(eventText);
     }
+    // Broken stream with no separator: if the tail exceeds the cap, redact and
+    // release it as raw text rather than buffering forever (§5). Framing is
+    // already lost in this degenerate case; the priority is not leaking + not OOM.
+    if (this.raw.length > MAX_UNFRAMED_BYTES) {
+      const r = redactText(this.raw, "outbound");
+      this.mergeMatched(r.matched);
+      this.raw = "";
+      out += r.text;
+    }
     return Buffer.from(out, "utf8");
   }
 
   flush(): Buffer {
-    return Buffer.from(this.emitFlush(), "utf8");
+    return Buffer.from(this.flushPending(), "utf8");
   }
 
   // ---- internals ----------------------------------------------------------
@@ -153,10 +176,9 @@ export class StreamRedactor {
     const ev = this.parseEvent(eventText);
     const nonData = ev.fields;
 
-    // terminal signals that carry non-JSON data (OpenAI [DONE]) — flush first
+    // OpenAI terminal marker (non-JSON) — release any held tail before it.
     if (ev.data.trim() === "[DONE]") {
-      const pre = this.emitFlush();
-      return pre + this.serialize(nonData, ev.data);
+      return this.flushPending() + this.serialize(nonData, ev.data);
     }
 
     let obj: unknown = null;
@@ -181,19 +203,29 @@ export class StreamRedactor {
       loc.set(emit);
       const body = this.serialize(nonData, JSON.stringify(obj));
       // terminal event that also carries text (Gemini): flush appended right before it
-      if (terminal) return this.emitFlush() + body;
+      if (terminal) return this.flushPending() + body;
       return body;
     }
 
+    // Per-block boundary (extended thinking has thinking + text blocks): release
+    // THIS block's held tail as a synthetic delta before its stop, then reset so
+    // the next block's text is held/flushed independently.
+    if (isBlockStop(this.provider, obj)) {
+      const pre = this.flushPending();
+      this.lastDeltaTemplate = null;
+      this.lastDeltaFields = [];
+      return pre + this.serialize(nonData, JSON.stringify(obj));
+    }
+
     // no text channel in this event
-    if (terminal) return this.emitFlush() + this.serialize(nonData, JSON.stringify(obj));
+    if (terminal) return this.flushPending() + this.serialize(nonData, JSON.stringify(obj));
     return this.serialize(nonData, parsed ? JSON.stringify(obj) : ev.data);
   }
 
-  /** Release the withheld tail as a synthetic delta cloned from the last delta event. */
-  private emitFlush(): string {
-    if (this.flushed) return "";
-    this.flushed = true;
+  /** Release the withheld tail as a synthetic delta cloned from the last delta
+   *  event. Idempotent: emits nothing when nothing is held (empties textTail),
+   *  so it is safe to call at every block boundary AND at the terminal. */
+  private flushPending(): string {
     if (this.textTail === "") return "";
     const r = redactText(this.textTail, "outbound");
     this.mergeMatched(r.matched);

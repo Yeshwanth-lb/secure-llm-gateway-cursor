@@ -1,6 +1,9 @@
 # Secure LLM Gateway Proxy — Implementation Plan
 
-**Deliverable:** `secure-llm-gateway.ts` — a single-file, zero-runtime-dependency TypeScript application (Node.js ≥ 22 built-ins only: `node:http`, `node:https`, `node:crypto`, `node:readline`, `node:fs`, `node:url`). Runs immediately with `node --experimental-strip-types secure-llm-gateway.ts` (or `npx tsx secure-llm-gateway.ts` on older Node).
+**Deliverable:** `secure-llm-gateway.ts` entry point + **`src/` module graph** (modularized
+2026-07-09; was single-file in the original design). Zero-runtime-dependency TypeScript
+(Node.js ≥ 22 built-ins only). Runs with `node --experimental-strip-types secure-llm-gateway.ts`
+(or `npx tsx …` on older Node).
 
 **Listen address:** `http://127.0.0.1:8000` (configurable via `GATEWAY_HOST` / `GATEWAY_PORT`).
 
@@ -76,12 +79,19 @@ Resolution order (first match wins):
 Default set:
 | Rule | Notes |
 |---|---|
-| `API_KEY` | `sk-…`, `sk-ant-…`, `AKIA…` (AWS), `AIza…` (Google), `ghp_/gho_` (GitHub), `xox…` (Slack) |
+| `PRIVATE_KEY` | PEM blocks (`BEGIN … PRIVATE KEY`) |
+| `JWT` | `eyJ` header + base64url payload + signature (optional `=` padding) |
+| `CONN_STRING` | `postgres/mysql/mongodb/redis/amqp/http(s)://user:pass@…` |
+| `API_KEY` | `sk-…`, `sk-ant-…`, `sk-proj-…`, Stripe `sk_live_/sk_test_/pk_*/rk_*`, `AKIA…` (AWS), `AIza…` (Google), `github_pat_` / `ghp_/gho_`, `npm_`, `hf_`, `xox…` (Slack), Slack webhooks |
 | `BEARER_TOKEN` | `Bearer <token≥16 chars>` appearing in payloads |
 | `EMAIL` | RFC-pragmatic pattern with TLD requirement |
+| `PHONE_US` | Separated / `+1` / parenthesized forms (no bare digit runs) |
+| `PHONE_IN` | `+91` prefix required |
 | `CREDIT_CARD` | 13–19 digits with optional space/dash separators, **validated with a Luhn checksum** to kill false positives |
 | `SSN` | `ddd-dd-dddd` |
-| `IPV4` | Strict octet ranges (0–255) |
+| `PAN_IN` | Indian PAN `AAAAA9999A` |
+| `AADHAAR` | 12-digit (optional spaces), **Verhoeff-validated** |
+| `IPV4` | Strict octet ranges (0–255); loopback skipped |
 | `IPV6` | Full and `::`-compressed groups (min 4 groups uncompressed to avoid matching clock times) |
 
 Custom rules merge **ahead of** defaults (they win overlap resolution) from either:

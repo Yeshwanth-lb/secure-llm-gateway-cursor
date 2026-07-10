@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/secure-llm-gateway.js",
+    "start": "node --experimental-strip-types secure-llm-gateway.ts",
     "dev": "node --experimental-strip-types secure-llm-gateway.ts",
     "stdio": "node dist/secure-llm-gateway.js --stdio",
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'"

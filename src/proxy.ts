@@ -19,11 +19,70 @@ import { extractModel, isModelBlocked } from "./model-policy.ts";
 /** Cap a snapshot string; cap <= 0 means unlimited. */
 const snap = (s: string, cap: number): string => (cap > 0 ? s.slice(0, cap) : s);
 
+/** Credential-bearing query params that must never reach a traffic-log path (§5). */
+const CRED_QUERY_KEYS = new Set(["key", "api_key", "apikey", "access_token", "token"]);
+
+/** Redact secret query params in a path before it is stored in a LogEntry. */
+function sanitizePath(rawPath: string): string {
+  const qi = rawPath.indexOf("?");
+  if (qi === -1) return rawPath;
+  const base = rawPath.slice(0, qi);
+  const params = new URLSearchParams(rawPath.slice(qi + 1));
+  let touched = false;
+  for (const k of [...params.keys()]) {
+    if (CRED_QUERY_KEYS.has(k.toLowerCase())) {
+      params.set(k, "[REDACTED]");
+      touched = true;
+    }
+  }
+  if (!touched) return rawPath;
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
 const isJson = (ct?: string): boolean => !!ct && /application\/json/i.test(ct);
 const isSse = (ct?: string): boolean => !!ct && /text\/event-stream/i.test(ct);
 const hasKeys = (m: Record<string, number>): boolean => Object.keys(m).length > 0;
 
-/** Scrub a body toward the given direction; JSON deep-walked, else raw text. */
+const isEmptyText = (b: unknown): boolean =>
+  !!b && typeof b === "object" && (b as any).type === "text" &&
+  (typeof (b as any).text !== "string" || (b as any).text.trim() === "");
+
+/**
+ * Repair empty text content blocks that some clients (e.g. Claude Code replaying
+ * a mangled assistant turn) leave in `messages[]`/`system[]`. Anthropic rejects
+ * them with `400 text content blocks must be non-empty`. Drop empties; if that
+ * would empty a content array, keep one minimal non-empty block. Mutates `obj`.
+ */
+function sanitizeEmptyBlocks(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, any>;
+  let changed = false;
+  const fix = (arr: unknown): void => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      const content = item && typeof item === "object" ? (item as any).content : undefined;
+      if (!Array.isArray(content)) continue;
+      const kept = content.filter((b: unknown) => !isEmptyText(b));
+      if (kept.length !== content.length) {
+        changed = true;
+        (item as any).content = kept.length ? kept : [{ type: "text", text: " " }];
+      }
+    }
+  };
+  fix(o.messages);
+  if (Array.isArray(o.system)) {
+    const kept = o.system.filter((b: unknown) => !isEmptyText(b));
+    if (kept.length !== o.system.length) {
+      changed = true;
+      o.system = kept.length ? kept : [{ type: "text", text: " " }];
+    }
+  }
+  return changed;
+}
+
+/** Scrub a body toward the given direction; JSON deep-walked, else raw text.
+ *  Inbound requests are also sanitized of empty text blocks before forwarding. */
 function scrub(
   raw: string,
   contentType: string | undefined,
@@ -32,7 +91,9 @@ function scrub(
   if (raw === "") return { text: "", matched: {} };
   if (isJson(contentType)) {
     try {
-      const { value, matched } = redactJson(JSON.parse(raw), dir);
+      const parsed = JSON.parse(raw);
+      if (dir === "inbound") sanitizeEmptyBlocks(parsed);
+      const { value, matched } = redactJson(parsed, dir);
       return { text: JSON.stringify(value), matched };
     } catch {
       // malformed JSON degrades to raw-text scrub (§7) — never forward raw.
@@ -65,7 +126,8 @@ function forward(
   method: string,
   headers: Record<string, string>,
   body: Buffer,
-): Promise<IncomingMessage> {
+  timeoutMs: number,
+): { req: http.ClientRequest; response: Promise<IncomingMessage> } {
   const target = new URL(route.upstreamBase + route.forwardPath);
   const mod = target.protocol === "https:" ? https : http;
   const opts: https.RequestOptions = {
@@ -74,13 +136,18 @@ function forward(
     port: target.port || (target.protocol === "https:" ? 443 : 80),
     path: target.pathname + target.search,
     headers: { ...headers, "content-length": String(body.length) },
+    timeout: timeoutMs > 0 ? timeoutMs : undefined,
   };
-  return new Promise((resolve, reject) => {
-    const r = mod.request(opts, resolve);
+  let r!: http.ClientRequest;
+  const response = new Promise<IncomingMessage>((resolve, reject) => {
+    r = mod.request(opts, resolve);
     r.on("error", reject);
+    // Connect/read timeout: abort so no request hangs forever (§5).
+    r.on("timeout", () => r.destroy(new Error(`upstream timeout after ${timeoutMs}ms`)));
     if (body.length) r.write(body);
     r.end();
   });
+  return { req: r, response };
 }
 
 export async function proxyRequest(
@@ -92,7 +159,7 @@ export async function proxyRequest(
 ): Promise<void> {
   const started = Date.now();
   const method = req.method ?? "GET";
-  const path = req.url ?? "/";
+  const path = sanitizePath(req.url ?? "/"); // strip secret query params before logging
   const reqCt = req.headers["content-type"];
 
   // --- inbound scrub (before any byte leaves the machine) --------------------
@@ -146,9 +213,17 @@ export async function proxyRequest(
   }
 
   // --- forward ---------------------------------------------------------------
+  const call = forward(route, method, fwdHeaders, cleanBody, config.upstreamTimeoutMs);
+  // Abort upstream work if the client goes away — don't keep a socket + buffer
+  // alive for a response nobody will read (§5).
+  const onClientClose = (): void => {
+    if (!res.writableEnded) call.req.destroy();
+  };
+  res.on("close", onClientClose);
+
   let upstream: IncomingMessage;
   try {
-    upstream = await forward(route, method, fwdHeaders, cleanBody);
+    upstream = await call.response;
   } catch (err) {
     record(502, false, "", {});
     if (!res.headersSent) {
@@ -191,8 +266,27 @@ export async function proxyRequest(
 
   // --- outbound scrub: buffered JSON / text ---------------------------------
   const chunks: Buffer[] = [];
-  upstream.on("data", (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+  let bufferedBytes = 0;
+  let overCap = false;
+  const cap = config.responseCapBytes;
+  upstream.on("data", (c: Buffer) => {
+    if (overCap) return;
+    const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+    bufferedBytes += buf.length;
+    // Bound non-SSE buffering so a huge/hostile upstream body can't exhaust
+    // memory (§5). Past the cap we abort and fail closed with a 502.
+    if (cap > 0 && bufferedBytes > cap) {
+      overCap = true;
+      upstream.destroy();
+      record(502, false, "", {});
+      if (!res.headersSent) sendJson(res, 502, { error: "Upstream response too large", maxBytes: cap });
+      else res.end();
+      return;
+    }
+    chunks.push(buf);
+  });
   upstream.on("end", () => {
+    if (overCap) return;
     const raw = Buffer.concat(chunks).toString("utf8");
     const out = scrub(raw, upCt, "outbound");
     const outBuf = Buffer.from(out.text, "utf8");

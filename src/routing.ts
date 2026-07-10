@@ -5,7 +5,7 @@
 // rather than throwing, since a missing route is normal control flow, not an error.
 import type { IncomingMessage } from "node:http";
 import type { Provider, RouteResult } from "./contracts.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, isLoopbackHost } from "./config.ts";
 
 /** Hop-by-hop / transport headers never forwarded upstream (newplan §2). */
 const HOP_BY_HOP = new Set([
@@ -48,15 +48,39 @@ function make(
  * Resolve the upstream provider for a request. First match wins (newplan §2):
  *   1 path prefix  2 x-llm-provider header  3 path heuristic  4 header sniff  5 none
  */
+export interface ResolveOptions {
+  /** Honor `x-llm-upstream` overrides (loopback targets only). Off by default. */
+  allowUpstreamOverride?: boolean;
+}
+
+/** True for `http(s)://localhost|127.x.x.x|[::1]` bases — the only override targets we accept. */
+function isLoopbackUrl(raw: string | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (host === "localhost") return true;
+    if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true; // IPv4 loopback /8
+    if (/^(?:0*:)*0*1$/.test(host)) return true; // IPv6 loopback (::1)
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function resolveRoute(
   req: IncomingMessage,
   upstreams: Record<Provider, string> = loadConfig().upstreams,
+  opts: ResolveOptions = {},
 ): RouteResult | null {
   const u = new URL(req.url ?? "/", "http://localhost");
   const path = u.pathname;
   const tail = path + u.search;
   const h = req.headers;
-  const override = firstHeader(h["x-llm-upstream"]);
+  // Only honor the override when explicitly enabled AND pointing at loopback,
+  // so an untrusted request can never redirect the gateway off-box (§5).
+  const requested = firstHeader(h["x-llm-upstream"]);
+  const override =
+    opts.allowUpstreamOverride && isLoopbackUrl(requested) ? requested : undefined;
 
   // Tier 1 — explicit path prefix (stripped before forwarding).
   for (const [prefix, provider] of PREFIXES) {

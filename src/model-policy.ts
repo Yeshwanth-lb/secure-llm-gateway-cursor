@@ -89,7 +89,11 @@ export function extractModel(
     const obj = JSON.parse(bodyText);
     if (obj && typeof obj.model === "string") return obj.model;
   } catch {
-    /* non-JSON body — no model */
+    /* fall through to raw-text scan below */
   }
+  // Fail-closed fallback: a malformed-JSON body must not slip a blocked model
+  // past the policy (§5). Scan the raw text for a "model":"…" pair.
+  const m = bodyText.match(/"model"\s*:\s*"([^"]+)"/);
+  if (m) return m[1];
   return undefined;
 }

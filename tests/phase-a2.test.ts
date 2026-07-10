@@ -137,3 +137,79 @@ test("regression: anthropic synthetic flush delta keeps its SSE event line", () 
     }
   }
 });
+
+// --- REGRESSION: extended thinking (thinking block + text block) -------------
+// A message with a thinking block then a text block has TWO content_block_stop
+// events. Treating the first (thinking) stop as terminal used to flush early and
+// DROP the answer text held in the holdback window — short replies came out
+// blank (the Haiku "hi" bug). Each block must flush independently.
+test("regression: extended-thinking answer text survives (per-block flush)", () => {
+  const sr = new StreamRedactor("anthropic", 96);
+  const ev = (o: any) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
+  const stream = [
+    ev({ type: "message_start", message: { role: "assistant" } }),
+    ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+    ev({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }),
+    ev({ type: "content_block_stop", index: 0 }),                       // thinking block ends
+    ev({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+    ev({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Hi!" } }), // short -> fully held
+    ev({ type: "content_block_stop", index: 1 }),                       // text block ends
+    ev({ type: "message_delta", delta: { stop_reason: "end_turn" } }),
+    ev({ type: "message_stop" }),
+  ];
+  let out = "";
+  for (const c of stream) out += sr.push(Buffer.from(c));
+  out += sr.flush();
+
+  // reconstruct the answer text (only text_delta on the TEXT block, index 1)
+  let text = "";
+  for (const block of out.split(/\r?\n\r?\n/).filter((b) => b.trim())) {
+    const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+    if (!data) continue;
+    const j = JSON.parse(data);
+    if (j.type === "content_block_delta" && j.delta?.type === "text_delta" && j.delta.text) text += j.delta.text;
+  }
+  assert.equal(text, "Hi!", "answer text is not dropped by the thinking block's stop");
+  assert.match(out, /message_stop/); // stream still terminates cleanly
+});
+
+// --- EDGE: PII inside thinking_delta is redacted outbound --------------------
+test("edge: email in thinking_delta is redacted without breaking text block", () => {
+  const sr = new StreamRedactor("anthropic", 96);
+  const ev = (o: any) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
+  const stream = [
+    ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+    ev({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "user email john.doe@example.com" },
+    }),
+    ev({ type: "content_block_stop", index: 0 }),
+    ev({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+    ev({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "ok" } }),
+    ev({ type: "content_block_stop", index: 1 }),
+    ev({ type: "message_stop" }),
+  ];
+  let out = "";
+  for (const c of stream) out += sr.push(Buffer.from(c));
+  out += sr.flush();
+
+  assert.doesNotMatch(out, /john\.doe@example\.com/);
+  assert.match(out, /\[REDACTED_MOCK_PII\]/);
+  assert.match(out, /text_delta.*ok/s);
+});
+
+// --- EDGE: JWT split across SSE chunks is fully redacted outbound ------------
+test("edge: JWT split across SSE chunks is redacted outbound", () => {
+  const jwt =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFBPKJXg";
+  const sr = new StreamRedactor("openai", 96);
+  let out = "";
+  const mid = Math.floor(jwt.length / 2);
+  out += sr.push(Buffer.from(`data: ${JSON.stringify({ choices: [{ delta: { content: jwt.slice(0, mid) } }] })}\n\n`));
+  out += sr.push(Buffer.from(`data: ${JSON.stringify({ choices: [{ delta: { content: jwt.slice(mid) } }] })}\n\n`));
+  out += sr.push(Buffer.from("data: [DONE]\n\n"));
+  out += sr.flush();
+  assert.doesNotMatch(out, /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9/);
+  assert.match(out, /\[REDACTED_MOCK_PII\]/);
+});

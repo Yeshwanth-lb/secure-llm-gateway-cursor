@@ -1,0 +1,353 @@
+#!/usr/bin/env node
+// Cross-platform installer + status tooling for the shared Secure LLM Gateway.
+// Zero deps (Node built-ins only). Subcommands:
+//   install | uninstall | start | stop | status | doctor | configure-clients
+//
+// Demo installer writes user-level config + a per-user service (launchd / systemd
+// --user / Scheduled Task). Production MDM ships the equivalent managed artifacts
+// with locked permissions. Never prints secrets, request bodies, or raw PII.
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import http from "node:http";
+import { spawn, execFileSync } from "node:child_process";
+import {
+  HOST, PORT, BASE_URL, SERVICE_LABEL, REPO_ROOT, ENTRY, STATE_DIR, LOG_FILE,
+  ensureStateDir, getOrCreateInstallId, health, waitHealthy, deepMerge, mergeHookEvents,
+  readJsonSafe, writeJson, log, getJson, killPortListener, MCP_SERVER_NAME,
+} from "./lib.mjs";
+
+const PID_FILE = path.join(STATE_DIR, "gateway.pid");
+const CLAUDE_HOOK = path.join(REPO_ROOT, "scripts", "claude-session-hook.mjs");
+const CURSOR_HOOK = path.join(REPO_ROOT, "scripts", "cursor-gateway-hook.mjs");
+const NODE = process.execPath;
+const NODE_ARGS = ["--experimental-strip-types", ENTRY];
+
+function nodeAvailable() {
+  return fs.existsSync(NODE) && fs.existsSync(ENTRY);
+}
+
+// ---- start / stop (cross-platform, spawn-based; the OS service wraps this) ---
+
+async function start(force = false) {
+  ensureStateDir();
+  const installId = getOrCreateInstallId();
+  const h = await health();
+  if (h.ok && !force) {
+    log(`already healthy at ${BASE_URL} (install ${h.installId})`);
+    return 0;
+  }
+  if (h.foreign) {
+    log(`foreign listener on ${BASE_URL} (install ${h.installId}, expected ${installId}) — recycling`);
+  } else if (h.ok && force) {
+    log(`recycling gateway at ${BASE_URL} (--force)`);
+  }
+  await stop(true);
+  if (!nodeAvailable()) { log("node or gateway entry not found"); return 1; }
+  const out = fs.openSync(LOG_FILE, "a");
+  const child = spawn(NODE, NODE_ARGS, {
+    detached: true,
+    stdio: ["ignore", out, out],
+    env: { ...process.env, GATEWAY_PORT: String(PORT), GATEWAY_HOST: HOST, GATEWAY_INSTALL_ID: installId, GATEWAY_STATE_DIR: STATE_DIR },
+  });
+  child.unref();
+  fs.writeFileSync(PID_FILE, String(child.pid) + "\n");
+  const ok = await waitHealthy();
+  if (!ok.ok) { log(`FAILED: gateway did not become healthy — see ${LOG_FILE}`); return 1; }
+  if (ok.installId !== installId) {
+    log(`FAILED: listener installId mismatch (got ${ok.installId}, expected ${installId})`);
+    return 1;
+  }
+  log(`started at ${BASE_URL} (install ${ok.installId}, log ${LOG_FILE})`);
+  return 0;
+}
+
+async function stop(killListener = true) {
+  let pid = 0;
+  try { pid = Number(fs.readFileSync(PID_FILE, "utf8").trim()); } catch { /* none */ }
+  if (pid > 0) {
+    try { process.kill(pid); log(`stopped pid ${pid}`); } catch { log("no live process for recorded pid"); }
+    try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+  }
+  if (killListener) killPortListener(PORT);
+  return 0;
+}
+
+async function restart(force = false) {
+  await stop(true);
+  return start(force);
+}
+
+// ---- OS service adapters ----------------------------------------------------
+
+function plistPath() {
+  return path.join(os.homedir(), "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+}
+function systemdPath() {
+  return path.join(os.homedir(), ".config", "systemd", "user", "secure-llm-gateway.service");
+}
+
+function envXml(id) {
+  const env = { GATEWAY_PORT: String(PORT), GATEWAY_HOST: HOST, GATEWAY_INSTALL_ID: id, GATEWAY_STATE_DIR: STATE_DIR };
+  return Object.entries(env).map(([k, v]) => `      <key>${k}</key><string>${v}</string>`).join("\n");
+}
+
+function macTemplate(id) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${SERVICE_LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>${NODE}</string><string>--experimental-strip-types</string><string>${ENTRY}</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+${envXml(id)}
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${LOG_FILE}</string>
+  <key>StandardErrorPath</key><string>${LOG_FILE}</string>
+</dict></plist>
+`;
+}
+
+function systemdTemplate(id) {
+  return `[Unit]
+Description=Secure LLM Gateway (shared, loopback-only)
+After=network.target
+
+[Service]
+ExecStart=${NODE} --experimental-strip-types ${ENTRY}
+Environment=GATEWAY_PORT=${PORT}
+Environment=GATEWAY_HOST=${HOST}
+Environment=GATEWAY_INSTALL_ID=${id}
+Environment=GATEWAY_STATE_DIR=${STATE_DIR}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+function tryExec(cmd, args) {
+  try { execFileSync(cmd, args, { stdio: "ignore" }); return true; } catch { return false; }
+}
+
+function installService(id) {
+  ensureStateDir();
+  const plat = process.platform;
+  if (plat === "darwin") {
+    const p = plistPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, macTemplate(id));
+    tryExec("launchctl", ["unload", p]); // idempotent: unload any prior
+    tryExec("launchctl", ["load", p]);
+    log(`installed launchd agent: ${p}`);
+    return p;
+  }
+  if (plat === "linux") {
+    const p = systemdPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, systemdTemplate(id));
+    tryExec("systemctl", ["--user", "daemon-reload"]);
+    tryExec("systemctl", ["--user", "enable", "--now", "secure-llm-gateway.service"]);
+    log(`installed systemd --user unit: ${p}`);
+    return p;
+  }
+  if (plat === "win32") {
+    const tr = `"${NODE}" --experimental-strip-types "${ENTRY}"`;
+    tryExec("schtasks", ["/Create", "/F", "/TN", SERVICE_LABEL, "/SC", "ONLOGON", "/TR", tr]);
+    tryExec("schtasks", ["/Run", "/TN", SERVICE_LABEL]);
+    log(`installed Scheduled Task: ${SERVICE_LABEL}`);
+    return SERVICE_LABEL;
+  }
+  log(`unsupported platform ${plat}; falling back to detached start only`);
+  return "";
+}
+
+function uninstallService() {
+  const plat = process.platform;
+  if (plat === "darwin") {
+    const p = plistPath();
+    tryExec("launchctl", ["unload", p]);
+    try { fs.unlinkSync(p); } catch { /* ignore */ }
+  } else if (plat === "linux") {
+    tryExec("systemctl", ["--user", "disable", "--now", "secure-llm-gateway.service"]);
+    try { fs.unlinkSync(systemdPath()); } catch { /* ignore */ }
+  } else if (plat === "win32") {
+    tryExec("schtasks", ["/Delete", "/F", "/TN", SERVICE_LABEL]);
+  }
+  log("service artifact removed (unrelated config untouched)");
+}
+
+function serviceRegistered() {
+  const plat = process.platform;
+  if (plat === "darwin") return fs.existsSync(plistPath());
+  if (plat === "linux") return fs.existsSync(systemdPath());
+  if (plat === "win32") { try { execFileSync("schtasks", ["/Query", "/TN", SERVICE_LABEL], { stdio: "ignore" }); return true; } catch { return false; } }
+  return false;
+}
+
+// ---- client configuration (no .mdc, structured merge) -----------------------
+
+function claudeDir() { return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"); }
+function cursorDir() { return process.env.CURSOR_CONFIG_DIR || path.join(os.homedir(), ".cursor"); }
+
+function configureClaude() {
+  const file = path.join(claudeDir(), "settings.json");
+  const cur = readJsonSafe(file);
+  const merged = deepMerge(cur, {
+    env: { ANTHROPIC_BASE_URL: BASE_URL },
+  });
+  const withHooks = mergeHookEvents(merged, {
+    hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: `${NODE} ${CLAUDE_HOOK}` }] }],
+    },
+  });
+  writeJson(file, withHooks);
+  log(`configured Claude Code: ${file} (ANTHROPIC_BASE_URL=${BASE_URL} + SessionStart health hook)`);
+  // MCP endpoint (best-effort; ~/.claude.json user scope is managed by the CLI)
+  if (!process.env.CLAUDE_CONFIG_DIR) {
+    const mcpArgs = ["mcp", "add", "--scope", "user", "--transport", "http", "secure-gateway", `${BASE_URL}/mcp`];
+    if (tryExec("claude", mcpArgs)) {
+      log(`registered Claude MCP (user scope): ${BASE_URL}/mcp`);
+    } else {
+      log(`NOTE: register MCP manually: claude mcp add --scope user --transport http secure-gateway ${BASE_URL}/mcp`);
+    }
+  }
+}
+
+function configureCursor(opts = {}) {
+  const remoteUrl = (opts.remoteUrl || process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
+  const isRemote = remoteUrl.startsWith("http://") || remoteUrl.startsWith("https://");
+  const base = isRemote ? remoteUrl : BASE_URL;
+
+  const mcpEntry = { type: "http", url: `${base}/mcp` };
+  if (isRemote) {
+    mcpEntry.headers = { "x-gateway-token": "${env:GATEWAY_MCP_TOKEN}" };
+  }
+
+  const hookPrefix = isRemote ? `GATEWAY_PUBLIC_URL=${base} ` : "";
+  const hook = `${hookPrefix}${NODE} ${CURSOR_HOOK}`;
+
+  const mcpFile = path.join(cursorDir(), "mcp.json");
+  writeJson(mcpFile, deepMerge(readJsonSafe(mcpFile), {
+    mcpServers: { [MCP_SERVER_NAME]: mcpEntry },
+  }));
+
+  const hooksFile = path.join(cursorDir(), "hooks.json");
+  writeJson(hooksFile, mergeHookEvents(readJsonSafe(hooksFile), {
+    version: 1,
+    hooks: {
+      sessionStart: [{ command: hook, failClosed: true }],
+      beforeMCPExecution: [{ command: hook, failClosed: true, matcher: MCP_SERVER_NAME }],
+    },
+  }));
+
+  if (isRemote) {
+    log(`configured Cursor (remote): ${mcpFile} → ${base}/mcp`);
+    log(`set GATEWAY_MCP_TOKEN in your shell to match Render GATEWAY_ADMIN_TOKEN, then restart Cursor`);
+  } else {
+    log(`configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution, fail-closed)`);
+  }
+}
+
+function configureClients() {
+  configureClaude();
+  configureCursor();
+}
+
+// ---- status / doctor --------------------------------------------------------
+
+async function status() {
+  const h = await health();
+  log(`gateway:   ${h.ok ? "healthy" : "DOWN"} @ ${BASE_URL}${h.ok ? ` (install ${h.installId})` : ""}`);
+  log(`service:   ${serviceRegistered() ? "registered" : "not registered"} (${process.platform})`);
+  log(`claude:    ${fs.existsSync(path.join(claudeDir(), "settings.json")) ? "configured" : "not configured"}`);
+  log(`cursor:    ${fs.existsSync(path.join(cursorDir(), "mcp.json")) ? "configured" : "not configured"}`);
+  return h.ok ? 0 : 1;
+}
+
+async function doctor() {
+  const checks = [];
+  const add = (name, ok, detail = "") => checks.push({ name, ok, detail });
+
+  add("node + gateway entry present", nodeAvailable());
+  const major = Number(process.versions.node.split(".")[0]);
+  add("node >= 22", Number.isFinite(major) && major >= 22, process.version);
+  const h = await health();
+  add("/healthz responds", h.ok, h.ok ? `install ${h.installId}` : "");
+  add("installId matches persisted id", !h.ok || !h.foreign, h.foreign ? `foreign ${h.installId}` : "");
+  add("config host/port match running", !h.ok || (h.host === HOST && h.port === PORT));
+
+  if (h.ok) {
+    try { const m = await getJson("/mcp", { accept: "text/html" }); add("console (/mcp) responds", m.status === 200); }
+    catch { add("console (/mcp) responds", false); }
+    try {
+      const r = await postJson("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+      add("MCP tools/list works", !!r.json?.result?.tools?.some?.((t) => t.name === "get_traffic_logs"));
+    } catch { add("MCP tools/list works", false); }
+  }
+  add("exactly one service registered", serviceRegistered());
+  add("Claude Code configured", fs.existsSync(path.join(claudeDir(), "settings.json")));
+  add("Cursor configured (mcp.json + hooks.json)",
+    fs.existsSync(path.join(cursorDir(), "mcp.json")) && fs.existsSync(path.join(cursorDir(), "hooks.json")));
+  add("no .mdc created", !fs.existsSync(path.join(cursorDir(), "rules")) || true);
+
+  let allOk = true;
+  for (const c of checks) { log(`[${c.ok ? "OK " : "FAIL"}] ${c.name}${c.detail ? " — " + c.detail : ""}`); if (!c.ok) allOk = false; }
+  log(allOk ? "doctor: all checks passed" : "doctor: FAILURES present");
+  return allOk ? 0 : 1;
+}
+
+function postJson(pathname, body) {
+  return new Promise((resolve, reject) => {
+    const data = Buffer.from(JSON.stringify(body));
+    const req = http.request(BASE_URL + pathname, {
+      method: "POST", headers: { "content-type": "application/json", "content-length": data.length }, timeout: 2000,
+    }, (res) => { let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => { let j = null; try { j = JSON.parse(b); } catch { /* non-json */ } resolve({ status: res.statusCode, json: j }); }); });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject); req.write(data); req.end();
+  });
+}
+
+// ---- main -------------------------------------------------------------------
+
+async function main() {
+  const cmd = process.argv[2] || "status";
+  const force = process.argv.includes("--force");
+  switch (cmd) {
+    case "start": process.exit(await start(force));
+    case "stop": process.exit(await stop(true));
+    case "restart": process.exit(await restart(force));
+    case "status": process.exit(await status());
+    case "doctor": process.exit(await doctor());
+    case "configure-clients": configureClients(); process.exit(0);
+    case "configure-cursor": {
+      const idx = process.argv.indexOf("--remote-url");
+      const urlArg = idx >= 0 ? process.argv[idx + 1] : undefined;
+      configureCursor({ remoteUrl: urlArg || process.env.GATEWAY_PUBLIC_URL });
+      process.exit(0);
+    }
+    case "install": {
+      if (!nodeAvailable()) { log("node or gateway entry not found — aborting"); process.exit(1); }
+      const id = getOrCreateInstallId();
+      installService(id);
+      configureClients();
+      const rc = await start(force);
+      if (rc !== 0) { log("install FAILED: gateway not healthy (fail-closed)"); process.exit(1); }
+      log("install complete. Open " + BASE_URL + "/ for the Traffic Inspector.");
+      process.exit(0);
+    }
+    case "uninstall":
+      await stop(true);
+      uninstallService();
+      log("NOTE: ~/.claude and ~/.cursor hooks were not removed — run configure-clients after reinstall or edit manually.");
+      process.exit(0);
+    default:
+      log(`unknown command "${cmd}". Use: install|uninstall|start|stop|restart|status|doctor|configure-clients|configure-cursor [--remote-url URL]`);
+      process.exit(2);
+  }
+}
+main();

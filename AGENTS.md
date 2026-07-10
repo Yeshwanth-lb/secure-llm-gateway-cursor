@@ -7,18 +7,19 @@ CLAUDE.md disagree, CLAUDE.md wins — and update CLAUDE.md's ledger as work pro
 
 ## The project in one paragraph
 
-`secure-llm-gateway.ts` — a **single-file, zero-dependency** local proxy (Node ≥ 22
-built-ins only) that sits between LLM clients and Anthropic/Gemini/OpenAI-compatible
-upstreams. It redacts PII **bidirectionally** (request and response, including PII split
-across streaming SSE chunks), keeps a 100-entry in-memory traffic log, and embeds an MCP
-server exposing `get_traffic_logs`. Design authority, in order: `newplan.md` → `PRD.md` →
-`IMPLEMENTATION_GUIDE.md`.
+`secure-llm-gateway.ts` is the entry point for a **zero-runtime-dependency** local proxy
+(modules under `src/`, Node ≥ 22 built-ins only) that sits between LLM clients and
+Anthropic/Gemini/OpenAI-compatible upstreams. It redacts PII **bidirectionally** (request
+and response, including PII split across streaming SSE chunks), keeps a 100-entry in-memory
+traffic log, and embeds an MCP server exposing `get_traffic_logs`. Design authority, in
+order: `newplan.md` → `PRD.md` → `IMPLEMENTATION_GUIDE.md`.
 
 ## Hard rules (do not violate)
 
 1. **Zero runtime dependencies.** Node built-ins only. No `npm install` of runtime deps, no
    frameworks. If you think you need a package, you don't — flag it instead of adding it.
-2. **One file.** All production code ships in `secure-llm-gateway.ts`.
+2. **Module graph under `src/`.** Entry point `secure-llm-gateway.ts` re-exports the public
+   barrel. Do not add runtime npm packages.
 3. **Never redact auth headers** (`x-api-key`, `Authorization`, `x-goog-api-key`). Redaction
    is body-only.
 4. **Never log or persist raw PII.** Snapshots/logs store post-redaction text only.
@@ -48,6 +49,7 @@ happy/failure/edge test target for each phase.
 
 ## Before you finish any change
 
-- Full suite green, no new dependency, no raw PII anywhere, ledger updated.
+- Full suite green (`npm test`, currently 76 tests), no new runtime dependency, no raw PII anywhere, ledger updated.
+- After changing redaction rules or gateway code, document `restart --force` in DEVELOPERS.md if lifecycle behavior changed.
 - Commit messages end with:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`

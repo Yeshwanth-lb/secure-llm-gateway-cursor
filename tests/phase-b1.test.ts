@@ -61,10 +61,12 @@ test("extra: header tier beats heuristic; gemini heuristic; x-llm-upstream overr
   const gem = resolveRoute(fakeReq("/v1beta/models/gemini:generateContent"), UPSTREAMS);
   assert.equal(gem!.provider, "gemini");
 
-  // per-request upstream override wins over configured base
+  // per-request upstream override wins over configured base — but only when
+  // explicitly enabled and pointing at loopback (hardening §5).
   const ovr = resolveRoute(
     fakeReq("/openai/v1/chat/completions", { "x-llm-upstream": "http://127.0.0.1:9101" }),
     UPSTREAMS,
+    { allowUpstreamOverride: true },
   );
   assert.equal(ovr!.upstreamBase, "http://127.0.0.1:9101");
 });

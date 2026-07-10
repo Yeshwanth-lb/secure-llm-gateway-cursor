@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8000"
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000"
   },
   "hooks": {
     "SessionStart": [
@@ -8,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/skyloindia/Desktop/MCP-PROXY/scripts/ensure-gateway.sh"
+            "command": "node scripts/claude-session-hook.mjs"
           }
         ]
       }

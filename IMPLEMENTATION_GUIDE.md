@@ -1,9 +1,14 @@
 # Implementation Guide — Secure LLM Gateway Proxy
 
-**Deliverable:** `secure-llm-gateway.ts` (single file, zero deps). See `newplan.md` for full design, `PRD.md` for requirements.
+**Deliverable:** `secure-llm-gateway.ts` entry + `src/` modules (zero runtime deps).
+See `newplan.md` for full design, `PRD.md` for requirements.
+
+> **Note (2026-07-09):** This guide originally specified a single file. Production code
+> now lives under `src/` for maintainability; contracts and phase gates are unchanged.
 
 **Team:** Mohit Sahoo, Yeshwanth
-**Model:** Both edit one file. To avoid collisions, each phase names an owner + a **frozen contract** (interfaces the other side codes against). Build interfaces first, then fill in parallel.
+**Model:** Work against frozen contracts in `src/contracts.ts`. Each phase names an owner;
+implement behind those seams so both workstreams can proceed in parallel.
 
 ---
 
