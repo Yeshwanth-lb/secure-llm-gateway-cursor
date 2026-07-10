@@ -50,17 +50,39 @@ export const DEFAULT_RULES: RedactionRule[] = [
   },
 ];
 
+export type RuleSourceKind = "default" | "custom-env" | "custom-file" | "custom-ui";
+
 export interface RuleSource {
   rule: RedactionRule;
-  source: "custom-env" | "custom-file" | "default";
+  source: RuleSourceKind;
 }
 
-let ACTIVE_RULES: RuleSource[] | null = null;
+// A mutable registry entry: a rule plus its live enabled state. The registry is
+// the single source of truth for the control-plane console AND the proxy —
+// toggles, added rules, and the allowlist take effect immediately, everywhere.
+interface RuleEntry {
+  rule: RedactionRule;
+  source: RuleSourceKind;
+  enabled: boolean;
+}
 
-function parseCustomRules(
-  json: string,
-  source: "custom-env" | "custom-file",
-): RuleSource[] {
+interface AllowEntry {
+  id: string;
+  pattern: RegExp;
+  source: "allow-env" | "allow-ui";
+  enabled: boolean;
+}
+
+let RULES: RuleEntry[] | null = null;
+let ALLOW: AllowEntry[] | null = null;
+let allowSeq = 0;
+
+function compileFlags(flags: string | undefined): string {
+  const f = flags ?? "g";
+  return f.includes("g") ? f : f + "g";
+}
+
+function parseCustomRules(json: string, source: RuleSourceKind): RuleEntry[] {
   let arr: unknown;
   try {
     arr = JSON.parse(json);
@@ -73,21 +95,18 @@ function parseCustomRules(
     if (!r || typeof r.name !== "string" || typeof r.pattern !== "string") {
       throw new Error(`${source}[${i}] needs string "name" and "pattern"`);
     }
-    const flags = r.flags ?? "g";
     let pattern: RegExp;
     try {
-      pattern = new RegExp(r.pattern, flags.includes("g") ? flags : flags + "g");
+      pattern = new RegExp(r.pattern, compileFlags(r.flags));
     } catch (e) {
       throw new Error(`${source}[${i}] bad regex: ${(e as Error).message}`);
     }
-    return { rule: { name: r.name, pattern }, source };
+    return { rule: { name: r.name, pattern }, source, enabled: true };
   });
 }
 
-/** Compile rules once (custom merged AHEAD of defaults — they win exact ties). */
-export function getRuleSources(): RuleSource[] {
-  if (ACTIVE_RULES) return ACTIVE_RULES;
-  const custom: RuleSource[] = [];
+function buildRegistry(): RuleEntry[] {
+  const custom: RuleEntry[] = [];
   if (process.env.CUSTOM_REGEX_RULES) {
     custom.push(...parseCustomRules(process.env.CUSTOM_REGEX_RULES, "custom-env"));
   }
@@ -95,21 +114,178 @@ export function getRuleSources(): RuleSource[] {
     const body = fs.readFileSync(process.env.CUSTOM_REGEX_RULES_FILE, "utf8");
     custom.push(...parseCustomRules(body, "custom-file"));
   }
-  ACTIVE_RULES = [
+  // custom merged AHEAD of defaults — they win exact-tie overlap resolution.
+  return [
     ...custom,
-    ...DEFAULT_RULES.map((rule) => ({ rule, source: "default" as const })),
+    ...DEFAULT_RULES.map((rule) => ({ rule, source: "default" as const, enabled: true })),
   ];
-  return ACTIVE_RULES;
 }
 
-/** Active rule names + provenance — feeds a future GET /rules (§4). */
+function registry(): RuleEntry[] {
+  if (!RULES) RULES = buildRegistry();
+  return RULES;
+}
+
+function allowlist(): AllowEntry[] {
+  if (!ALLOW) {
+    ALLOW = [];
+    if (process.env.CUSTOM_ALLOWLIST) {
+      let arr: unknown;
+      try {
+        arr = JSON.parse(process.env.CUSTOM_ALLOWLIST);
+      } catch {
+        arr = [];
+      }
+      if (Array.isArray(arr)) {
+        for (const raw of arr) {
+          const r = raw as { pattern?: string; flags?: string };
+          if (typeof r?.pattern !== "string") continue;
+          try {
+            ALLOW.push({
+              id: `a${++allowSeq}`,
+              pattern: new RegExp(r.pattern, compileFlags(r.flags)),
+              source: "allow-env",
+              enabled: true,
+            });
+          } catch {
+            /* skip bad allowlist regex */
+          }
+        }
+      }
+    }
+  }
+  return ALLOW;
+}
+
+/** Enabled rule sources — consumed by redactText and the StreamRedactor. */
+export function getRuleSources(): RuleSource[] {
+  return registry()
+    .filter((e) => e.enabled)
+    .map((e) => ({ rule: e.rule, source: e.source }));
+}
+
+/** True if a matched substring is covered by an enabled allowlist entry. */
+export function isAllowlisted(text: string): boolean {
+  for (const a of allowlist()) {
+    if (!a.enabled) continue;
+    const re = new RegExp(a.pattern.source, compileFlags(a.pattern.flags));
+    if (re.test(text)) return true;
+  }
+  return false;
+}
+
+// ---- control-plane surface (used by the console + /api) --------------------
+
+export interface RuleView {
+  name: string;
+  pattern: string;
+  flags: string;
+  source: RuleSourceKind;
+  enabled: boolean;
+  hasValidator: boolean;
+}
+export interface AllowView {
+  id: string;
+  pattern: string;
+  flags: string;
+  source: string;
+  enabled: boolean;
+}
+
+export function listRules(): RuleView[] {
+  return registry().map((e) => ({
+    name: e.rule.name,
+    pattern: e.rule.pattern.source,
+    flags: e.rule.pattern.flags,
+    source: e.source,
+    enabled: e.enabled,
+    hasValidator: typeof e.rule.validate === "function",
+  }));
+}
+
+export function setRuleEnabled(name: string, enabled: boolean): boolean {
+  const e = registry().find((r) => r.rule.name === name);
+  if (!e) return false;
+  e.enabled = enabled;
+  return true;
+}
+
+export function addCustomRule(name: string, pattern: string, flags?: string): RuleView {
+  if (!name || !pattern) throw new Error('both "name" and "pattern" are required');
+  if (registry().some((r) => r.rule.name === name)) {
+    throw new Error(`a rule named "${name}" already exists`);
+  }
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern, compileFlags(flags));
+  } catch (e) {
+    throw new Error(`bad regex: ${(e as Error).message}`);
+  }
+  // custom rules go AHEAD of defaults so they win overlap resolution.
+  const entry: RuleEntry = { rule: { name, pattern: re }, source: "custom-ui", enabled: true };
+  registry().unshift(entry);
+  return listRules().find((r) => r.name === name)!;
+}
+
+export function removeRule(name: string): boolean {
+  const reg = registry();
+  const i = reg.findIndex((r) => r.rule.name === name);
+  if (i === -1) return false;
+  if (reg[i].source === "default") throw new Error("default rules cannot be removed (disable instead)");
+  reg.splice(i, 1);
+  return true;
+}
+
+export function listAllowlist(): AllowView[] {
+  return allowlist().map((a) => ({
+    id: a.id,
+    pattern: a.pattern.source,
+    flags: a.pattern.flags,
+    source: a.source,
+    enabled: a.enabled,
+  }));
+}
+
+export function addAllowlistEntry(pattern: string, flags?: string): AllowView {
+  if (!pattern) throw new Error('"pattern" is required');
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern, compileFlags(flags));
+  } catch (e) {
+    throw new Error(`bad regex: ${(e as Error).message}`);
+  }
+  const entry: AllowEntry = { id: `a${++allowSeq}`, pattern: re, source: "allow-ui", enabled: true };
+  allowlist().push(entry);
+  return { id: entry.id, pattern: re.source, flags: re.flags, source: entry.source, enabled: true };
+}
+
+export function setAllowlistEnabled(id: string, enabled: boolean): boolean {
+  const a = allowlist().find((x) => x.id === id);
+  if (!a) return false;
+  a.enabled = enabled;
+  return true;
+}
+
+export function removeAllowlistEntry(id: string): boolean {
+  const list = allowlist();
+  const i = list.findIndex((x) => x.id === id);
+  if (i === -1) return false;
+  list.splice(i, 1);
+  return true;
+}
+
+/** Active rule names + provenance (enabled only) — feeds GET /rules (§4). */
 export function getActiveRuleInfo(): { name: string; source: string }[] {
-  return getRuleSources().map((rs) => ({ name: rs.rule.name, source: rs.source }));
+  return registry()
+    .filter((e) => e.enabled)
+    .map((e) => ({ name: e.rule.name, source: e.source }));
 }
 
-/** Test/reload seam: drop the compiled-rule cache so env changes take effect. */
+/** Test/reload seam: rebuild the registry + allowlist from defaults + env. */
 export function resetRedactionRules(): void {
-  ACTIVE_RULES = null;
+  RULES = null;
+  ALLOW = null;
+  allowSeq = 0;
 }
 
 function tokenFor(dir: Direction, ruleName: string): string {
@@ -141,6 +317,7 @@ export function redactText(text: string, dir: Direction): RedactResult {
         continue;
       }
       if (rule.validate && !rule.validate(m[0])) continue;
+      if (isAllowlisted(m[0])) continue; // allowlisted values are left intact
       matches.push({ start: m.index, end: m.index + m[0].length, name: rule.name });
     }
   }

@@ -67,7 +67,7 @@ function openLegacySse(): Promise<{
     const queue: any[] = [];
     const waiters: ((v: any) => void)[] = [];
     let endpoint = "";
-    const req = http.get(`${base}/mcp`, (res) => {
+    const req = http.get(`${base}/mcp`, { headers: { accept: "text/event-stream" } }, (res) => {
       let buf = "";
       res.on("data", (d: Buffer) => {
         buf += d.toString("utf8");

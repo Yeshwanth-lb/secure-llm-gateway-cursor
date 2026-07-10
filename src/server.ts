@@ -9,6 +9,24 @@ import { proxyRequest } from "./proxy.ts";
 import { getActiveRuleInfo } from "./redaction.ts";
 import { trafficLog } from "./traffic-log.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
+import { CONSOLE_HTML } from "./console.ts";
+import { handleControlApi, isApiPath } from "./control-api.ts";
+import { cleanEntry } from "./clean-view.ts";
+
+function sendHtml(res: ServerResponse, html: string): void {
+  const body = Buffer.from(html, "utf8");
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": String(body.length),
+  });
+  res.end(body);
+}
+
+/** True when the client wants an SSE stream (MCP legacy transport), not HTML. */
+function wantsEventStream(req: IncomingMessage): boolean {
+  const accept = String(req.headers["accept"] ?? "");
+  return /text\/event-stream/i.test(accept);
+}
 
 const NO_ROUTE_HINT = {
   error: "No route matched",
@@ -40,13 +58,29 @@ async function handleRequest(
     return;
   }
 
+  // Frontend: the control-plane console (rules + allowlist + traffic inspector).
+  if (method === "GET" && (path === "/" || path === "/console" || path === "/inspector")) {
+    sendHtml(res, CONSOLE_HTML);
+    return;
+  }
+  // GET /mcp in a BROWSER (Accept: text/html) serves the console; an MCP client
+  // (Accept: text/event-stream) falls through to the legacy SSE transport below.
+  if (method === "GET" && path === "/mcp" && !wantsEventStream(req)) {
+    sendHtml(res, CONSOLE_HTML);
+    return;
+  }
+
   // Admin endpoints — answered before touching the body.
   if (method === "GET" && path === "/healthz") {
     sendJson(res, 200, { status: "ok", service: "secure-llm-gateway" });
     return;
   }
   if (method === "GET" && path === "/logs") {
-    sendJson(res, 200, { entries: trafficLog.recent(100, false) });
+    const entries = trafficLog.recent(100, false);
+    // ?clean=1 attaches a distilled { userPrompt, assistantOutput } per entry,
+    // stripping Claude Code's injected boilerplate (system-reminder/system/tools).
+    const clean = url.searchParams.get("clean") === "1";
+    sendJson(res, 200, { entries: clean ? entries.map(cleanEntry) : entries });
     return;
   }
   if (method === "GET" && path === "/rules") {
@@ -64,6 +98,12 @@ async function handleRequest(
       return;
     }
     sendJson(res, 400, { error: "Failed to read request body" });
+    return;
+  }
+
+  // Control plane — console API (rule toggles, custom rules, allowlist).
+  if (isApiPath(path)) {
+    handleControlApi(req, res, bodyBuf, method, path);
     return;
   }
 

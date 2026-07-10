@@ -37,6 +37,15 @@ export {
   resetRedactionRules,
   redactText,
   redactJson,
+  isAllowlisted,
+  listRules,
+  setRuleEnabled,
+  addCustomRule,
+  removeRule,
+  listAllowlist,
+  addAllowlistEntry,
+  setAllowlistEnabled,
+  removeAllowlistEntry,
 } from "./src/redaction.ts";
 export { StreamRedactor } from "./src/stream-redactor.ts";
 export { resolveRoute, buildForwardHeaders } from "./src/routing.ts";
@@ -44,6 +53,17 @@ export { trafficLog } from "./src/traffic-log.ts";
 export { proxyRequest } from "./src/proxy.ts";
 export { dispatch, handleMcpHttp, isMcpPath } from "./src/mcp.ts";
 export { createGatewayServer } from "./src/server.ts";
+export { INSPECTOR_HTML } from "./src/inspector.ts";
+export { CONSOLE_HTML } from "./src/console.ts";
+export { handleControlApi, isApiPath } from "./src/control-api.ts";
+export { cleanEntry, extractUserPrompt, extractAssistantOutput } from "./src/clean-view.ts";
+export {
+  listModelPolicies,
+  setModelBlocked,
+  resetModelPolicies,
+  isModelBlocked,
+  extractModel,
+} from "./src/model-policy.ts";
 
 // ---- bootstrap --------------------------------------------------------------
 function main(): void {
@@ -52,6 +72,15 @@ function main(): void {
   if (stdio) startStdioTransport(); // stdout stays JSON-RPC only; logs go to stderr
 
   const server = createGatewayServer();
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    // A busy port must never take down the process — especially in stdio mode,
+    // where the MCP transport on stdin/stdout is independent of the HTTP server.
+    process.stderr.write(
+      `secure-llm-gateway: HTTP listen failed on ${config.host}:${config.port} (${err.code ?? err.message}).\n`,
+    );
+    if (!stdio) process.exit(1); // no stdio fallback -> nothing to do, exit cleanly
+    process.stderr.write("Continuing in stdio-only mode (HTTP proxy + /logs unavailable).\n");
+  });
   server.listen(config.port, config.host, () => {
     process.stderr.write(
       `secure-llm-gateway listening on http://${config.host}:${config.port}\n`,

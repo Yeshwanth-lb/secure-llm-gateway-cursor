@@ -96,3 +96,44 @@ test("edge: email split across 3 chunks is redacted, flushed before [DONE], noth
   );
   assert.ok(doneIdx >= 0, "terminal [DONE] still present");
 });
+
+// --- REGRESSION: Anthropic flush must keep its `event:` line ------------------
+// A short response held entirely in the holdback window is released only at
+// flush. That synthetic delta MUST carry `event: content_block_delta`, or an
+// event-name-dispatching client (Claude Code) drops it and records an empty
+// text block -> next turn fails with Anthropic 400 "text content blocks must be
+// non-empty". Guards that exact bug.
+test("regression: anthropic synthetic flush delta keeps its SSE event line", () => {
+  const sr = new StreamRedactor("anthropic", 96);
+  const ev = (o: any) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
+  const stream = [
+    ev({ type: "message_start", message: { id: "m1", role: "assistant", content: [] } }),
+    ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+    ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi " } }),
+    ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "there" } }),
+    ev({ type: "content_block_stop", index: 0 }),
+    ev({ type: "message_stop" }),
+  ];
+  let out = "";
+  for (const c of stream) out += sr.push(Buffer.from(c));
+  out += sr.flush();
+
+  // reconstruct assistant text the way an event-dispatching client does:
+  // only accept content_block_delta events that actually declare `event:`.
+  let text = "";
+  for (const block of out.split(/\r?\n\r?\n/).filter((b) => b.trim())) {
+    const lines = block.split(/\r?\n/);
+    const evName = lines.find((l) => l.startsWith("event:"))?.slice(6).trim();
+    const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+    if (evName !== "content_block_delta" || !data) continue;
+    const j = JSON.parse(data);
+    if (j.delta?.text) text += j.delta.text;
+  }
+  assert.equal(text, "Hi there", "no delta dropped for lack of an event line");
+  // every content_block_delta event in the output declares an `event:` line
+  for (const block of out.split(/\r?\n\r?\n/).filter((b) => b.trim())) {
+    if (/"type":"content_block_delta"/.test(block)) {
+      assert.match(block, /event: content_block_delta/, "flush delta carries its event line");
+    }
+  }
+});

@@ -3,7 +3,7 @@
 // into ONE logical channel with a rolling holdback window so PII split across
 // chunk boundaries is still caught, then re-serializes protocol-identical events.
 import type { Provider } from "./contracts.ts";
-import { getRuleSources, redactText } from "./redaction.ts";
+import { getRuleSources, redactText, isAllowlisted } from "./redaction.ts";
 
 interface SseEvent {
   fields: { name: string; value: string }[]; // ordered, preserves event:/id:/retry:/comments
@@ -60,6 +60,7 @@ export class StreamRedactor {
   private raw = ""; // incomplete SSE tail awaiting a frame boundary
   private textTail = ""; // withheld channel text inside the holdback window
   private lastDeltaTemplate: unknown = null; // structure to clone for synthetic flush
+  private lastDeltaFields: { name: string; value: string }[] = []; // its SSE fields (event:/id:)
   private flushed = false;
 
   constructor(provider: Provider, holdback: number) {
@@ -109,6 +110,7 @@ export class StreamRedactor {
           continue;
         }
         if (rule.validate && !rule.validate(mm[0])) continue;
+        if (isAllowlisted(mm[0])) continue; // allowlisted -> not redacted, don't defer
         const end = mm.index + mm[0].length;
         if (end > cut) cut = Math.min(cut, mm.index);
       }
@@ -174,6 +176,7 @@ export class StreamRedactor {
 
     if (loc) {
       this.lastDeltaTemplate = JSON.parse(JSON.stringify(obj)); // structural clone
+      this.lastDeltaFields = nonData; // preserve the SSE `event:`/`id:` lines for flush
       const emit = this.feed(loc.get());
       loc.set(emit);
       const body = this.serialize(nonData, JSON.stringify(obj));
@@ -200,7 +203,9 @@ export class StreamRedactor {
       const loc = locateDeltaText(this.provider, clone);
       if (loc) {
         loc.set(r.text);
-        return this.serialize([], JSON.stringify(clone));
+        // re-emit with the ORIGINAL SSE event fields (e.g. `event: content_block_delta`)
+        // so event-name-dispatching clients (Anthropic/Claude Code) don't drop it.
+        return this.serialize(this.lastDeltaFields, JSON.stringify(clone));
       }
     }
     // no template seen — emit a bare data event so nothing is dropped

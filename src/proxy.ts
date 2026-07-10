@@ -14,8 +14,10 @@ import { redactJson, redactText } from "./redaction.ts";
 import { StreamRedactor } from "./stream-redactor.ts";
 import { trafficLog } from "./traffic-log.ts";
 import { sendJson } from "./http-utils.ts";
+import { extractModel, isModelBlocked } from "./model-policy.ts";
 
-const SNAP = 500; // snapshot char cap (newplan §4)
+/** Cap a snapshot string; cap <= 0 means unlimited. */
+const snap = (s: string, cap: number): string => (cap > 0 ? s.slice(0, cap) : s);
 
 const isJson = (ct?: string): boolean => !!ct && /application\/json/i.test(ct);
 const isSse = (ct?: string): boolean => !!ct && /text\/event-stream/i.test(ct);
@@ -97,17 +99,21 @@ export async function proxyRequest(
   const inbound = scrub(bodyBuf.toString("utf8"), reqCt, "inbound");
   const cleanBody = Buffer.from(inbound.text, "utf8");
   const fwdHeaders = buildForwardHeaders(req, route);
+  const model = extractModel(route.provider, route.forwardPath, bodyBuf.toString("utf8"));
 
   const record = (
     status: number,
     streaming: boolean,
     respText: string,
     outMatched: Record<string, number>,
+    blocked = false,
   ): void => {
     const entry: LogEntry = {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
       provider: route.provider,
+      model,
+      blocked,
       method,
       path,
       status,
@@ -119,14 +125,25 @@ export async function proxyRequest(
         total: inbound.text.length + respText.length,
       },
       payloadSnapshot: {
-        request: inbound.text.slice(0, SNAP),
-        response: respText.slice(0, SNAP),
+        request: snap(inbound.text, config.snapshotChars),
+        response: snap(respText, config.snapshotChars),
       },
       piiDetected: hasKeys(inbound.matched) || hasKeys(outMatched),
       matchedRules: { inbound: inbound.matched, outbound: outMatched },
     };
     trafficLog.push(entry);
   };
+
+  // --- model policy: block before forwarding (nothing leaves the machine) ----
+  if (isModelBlocked(model)) {
+    record(403, false, "", {}, true);
+    sendJson(res, 403, {
+      error: "Model blocked by gateway policy",
+      model,
+      hint: "Unblock it in the console Model Policy tab.",
+    });
+    return;
+  }
 
   // --- forward ---------------------------------------------------------------
   let upstream: IncomingMessage;
@@ -154,7 +171,8 @@ export async function proxyRequest(
     const emit = (buf: Buffer): void => {
       if (buf.length === 0) return;
       res.write(buf);
-      if (respText.length < SNAP) respText += buf.toString("utf8");
+      const cap = config.snapshotChars;
+      if (cap <= 0 || respText.length < cap) respText += buf.toString("utf8");
     };
     upstream.on("data", (c: Buffer) =>
       emit(sr.push(Buffer.isBuffer(c) ? c : Buffer.from(c))),

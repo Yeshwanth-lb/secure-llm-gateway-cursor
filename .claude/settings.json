@@ -1,0 +1,17 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8000"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/skyloindia/Desktop/MCP-PROXY/scripts/ensure-gateway.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

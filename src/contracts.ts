@@ -34,6 +34,8 @@ export interface LogEntry {
   id: string;
   timestamp: string;
   provider: Provider;
+  model?: string; // model id from the request body/path, when detectable
+  blocked?: boolean; // true when rejected by model-policy (not forwarded)
   method: string;
   path: string;
   status: number;
