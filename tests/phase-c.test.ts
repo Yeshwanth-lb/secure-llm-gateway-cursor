@@ -349,6 +349,38 @@ test("hardening/edge: zero-length custom regex does not infinite-loop", () => {
   }
 });
 
+test("hardening/edge: RENDER=true auto-binds 0.0.0.0 with admin token", () => {
+  const prev = {
+    r: process.env.RENDER,
+    t: process.env.GATEWAY_ADMIN_TOKEN,
+    g: process.env.GATEWAY_REMOTE,
+    h: process.env.GATEWAY_HOST,
+    p: process.env.PORT,
+  };
+  process.env.RENDER = "true";
+  process.env.PORT = "10000";
+  process.env.GATEWAY_ADMIN_TOKEN = "render-token";
+  delete process.env.GATEWAY_REMOTE;
+  delete process.env.GATEWAY_HOST;
+  try {
+    const cfg = loadConfig();
+    assert.equal(cfg.host, "0.0.0.0");
+    assert.equal(cfg.port, 10000);
+    assert.equal(cfg.remoteMode, true);
+  } finally {
+    if (prev.r === undefined) delete process.env.RENDER;
+    else process.env.RENDER = prev.r;
+    if (prev.t === undefined) delete process.env.GATEWAY_ADMIN_TOKEN;
+    else process.env.GATEWAY_ADMIN_TOKEN = prev.t;
+    if (prev.g === undefined) delete process.env.GATEWAY_REMOTE;
+    else process.env.GATEWAY_REMOTE = prev.g;
+    if (prev.h === undefined) delete process.env.GATEWAY_HOST;
+    else process.env.GATEWAY_HOST = prev.h;
+    if (prev.p === undefined) delete process.env.PORT;
+    else process.env.PORT = prev.p;
+  }
+});
+
 // EDGE — remote mode allows 0.0.0.0 bind when admin token is set.
 test("hardening/edge: GATEWAY_REMOTE=1 allows 0.0.0.0 with admin token", () => {
   const prev = { r: process.env.GATEWAY_REMOTE, t: process.env.GATEWAY_ADMIN_TOKEN, h: process.env.GATEWAY_HOST };

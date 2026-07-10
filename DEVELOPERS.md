@@ -242,9 +242,13 @@ Local mode (default) binds **127.0.0.1 only**. Cloud mode is opt-in via `GATEWAY
 ### 1. Deploy to Render
 
 1. Push this repo to GitHub.
-2. Create a **Web Service** on Render from the repo (uses `render.yaml`).
-3. Set **`GATEWAY_ADMIN_TOKEN`** in the Render dashboard (or use auto-generated).
-4. Note the public URL, e.g. `https://secure-llm-gateway-xxxx.onrender.com`.
+2. Create a **Web Service** on Render from the repo (Blueprint uses `render.yaml`).
+3. In Render **Environment**, set **`GATEWAY_ADMIN_TOKEN`** (required). Blueprint can
+   auto-generate it via `generateValue: true` in `render.yaml`.
+4. Confirm logs show `listening on http://0.0.0.0:…` — **not** `127.0.0.1`. If you see
+   `127.0.0.1`, redeploy after pulling the latest code (Render auto-sets `RENDER=true`
+   which now triggers `0.0.0.0` bind).
+5. Note the public URL, e.g. `https://secure-llm-gateway-xxxx.onrender.com`.
 
 Required env on Render:
 

@@ -1,8 +1,6 @@
 # Render.com web service — remote MCP + LLM proxy (opt-in cloud mode).
-# Set GATEWAY_ADMIN_TOKEN in the Render dashboard (or use generateValue below).
-# After deploy, configure Cursor locally:
-#   export GATEWAY_MCP_TOKEN=<same token>
-#   node scripts/gateway-service.mjs configure-cursor --remote-url https://YOUR-SERVICE.onrender.com
+# Render auto-sets RENDER=true and PORT; the gateway detects that and binds 0.0.0.0.
+# YOU MUST set GATEWAY_ADMIN_TOKEN in the Render dashboard (Environment tab).
 services:
   - type: web
     name: secure-llm-gateway

@@ -47,9 +47,15 @@ function toIntAllowZero(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
+/** True when running on Render (injects RENDER=true + PORT). */
+export function isRenderRuntime(): boolean {
+  return process.env.RENDER === "true";
+}
+
 /** Build config from environment with sane defaults; overrides win (tests use them). */
 export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  const remoteMode = process.env.GATEWAY_REMOTE === "1";
+  // RENDER=true is injected by Render even when render.yaml env vars are missing.
+  const remoteMode = process.env.GATEWAY_REMOTE === "1" || isRenderRuntime();
   const base: GatewayConfig = {
     host: process.env.GATEWAY_HOST ?? (remoteMode ? "0.0.0.0" : "127.0.0.1"),
     // Render/Heroku set PORT; fall back to GATEWAY_PORT then 8000.
@@ -92,7 +98,9 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     );
   }
   if (merged.remoteMode && merged.adminToken === "") {
-    throw new Error("GATEWAY_REMOTE=1 requires GATEWAY_ADMIN_TOKEN to be set");
+    throw new Error(
+      "remote deploy requires GATEWAY_ADMIN_TOKEN (set in Render Environment)",
+    );
   }
   return merged;
 }
