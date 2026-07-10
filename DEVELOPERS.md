@@ -249,6 +249,9 @@ Local mode (default) binds **127.0.0.1 only**. Cloud mode is opt-in via `GATEWAY
    `127.0.0.1`, redeploy after pulling the latest code (Render auto-sets `RENDER=true`
    which now triggers `0.0.0.0` bind).
 5. Note the public URL, e.g. `https://secure-llm-gateway-xxxx.onrender.com`.
+6. Open the console with your admin token (remote mode blocks unauthenticated reads):
+   `https://YOUR-SERVICE.onrender.com/?token=YOUR_GATEWAY_ADMIN_TOKEN`
+   Or paste the token in the **unlock** field on the dashboard header.
 
 Required env on Render:
 
@@ -261,8 +264,22 @@ Required env on Render:
 
 ### 2. Configure Cursor on your Mac
 
+Store secrets outside git (recommended):
+
 ```bash
 cd /path/to/MCP-PROXY
+node scripts/gateway-service.mjs init-env \
+  --token "<same as Render GATEWAY_ADMIN_TOKEN>" \
+  --remote-url https://YOUR-SERVICE.onrender.com
+```
+
+This writes **`~/.secure-llm-gateway/.env`** (mode `600`) and configures Cursor + Claude
+to use a **stdio MCP bridge** (`scripts/mcp-remote-bridge.mjs`) that reads the token
+from that file — no `${env:…}` in `mcp.json` (GUI apps on macOS don't inherit shell env).
+
+Or configure clients manually after exporting the token:
+
+```bash
 export GATEWAY_MCP_TOKEN="<same as Render GATEWAY_ADMIN_TOKEN>"
 node scripts/gateway-service.mjs configure-cursor --remote-url https://YOUR-SERVICE.onrender.com
 ```
@@ -270,13 +287,37 @@ node scripts/gateway-service.mjs configure-cursor --remote-url https://YOUR-SERV
 Restart Cursor. The hook health-checks the remote URL; MCP calls send
 `x-gateway-token` via `${env:GATEWAY_MCP_TOKEN}`.
 
-Add to `~/.zshrc` so the token survives restarts:
+Add to `~/.zshrc` so terminals and hooks see the token:
 
 ```bash
-export GATEWAY_MCP_TOKEN="your-render-admin-token"
+[ -f ~/.secure-llm-gateway/.env ] && set -a && . ~/.secure-llm-gateway/.env && set +a
 ```
 
-### 3. What works remotely
+### 3. Configure Claude Code (same remote gateway)
+
+After `init-env` (above), Claude is configured automatically. Or manually:
+
+```bash
+export GATEWAY_MCP_TOKEN="<same as Render GATEWAY_ADMIN_TOKEN>"
+node scripts/gateway-service.mjs configure-claude --remote-url https://YOUR-SERVICE.onrender.com
+```
+
+This sets `ANTHROPIC_BASE_URL` to the Render URL (Claude API traffic is proxied
+and redacted), registers `secure-gateway` MCP as a **stdio bridge** (same as
+Cursor — token stays in `~/.secure-llm-gateway/.env`), and uses a remote
+SessionStart health hook (no local gateway start).
+
+Restart Claude Code (`/exit`, then reopen). Your Anthropic API key stays in
+Claude's normal auth — the gateway only proxies and redacts.
+
+If `/mcp` still fails, confirm user-scope MCP:
+
+```bash
+claude mcp list
+# secure-gateway should be stdio → mcp-remote-bridge.mjs
+```
+
+### 4. What works remotely
 
 | Endpoint | Auth | Purpose |
 |---|---|---|

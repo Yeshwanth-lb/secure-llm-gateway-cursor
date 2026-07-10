@@ -82,6 +82,10 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     <div class="tab" data-tab="traffic">Traffic Inspector</div>
   </div>
   <div class="spacer"></div>
+  <span id="auth-wrap" style="display:none; gap:6px; align-items:center">
+    <input id="auth-token" type="password" placeholder="admin token" size="22" />
+    <button id="auth-save">unlock</button>
+  </span>
   <span class="stat" id="hdr"></span>
 </header>
 <main>
@@ -137,12 +141,31 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
     });
   };
+  var TOKEN_KEY = "sgw-admin-token";
+  var adminToken = "";
+  var loadToken = function () {
+    var p = new URLSearchParams(location.search).get("token");
+    if (p) {
+      sessionStorage.setItem(TOKEN_KEY, p);
+      history.replaceState({}, "", location.pathname + location.hash);
+    }
+    adminToken = sessionStorage.getItem(TOKEN_KEY) || "";
+  };
+  var authHeaders = function (extra) {
+    var h = extra ? Object.assign({}, extra) : {};
+    if (adminToken) h["x-gateway-token"] = adminToken;
+    return h;
+  };
+  var showAuth = function (msg) {
+    document.getElementById("auth-wrap").style.display = "flex";
+    document.getElementById("hdr").innerHTML = '<span class="err">' + esc(msg || "Admin token required") + "</span>";
+  };
   var api = function (path, body) {
     return fetch(path, {
       method: body ? "POST" : "GET",
-      headers: body ? { "content-type": "application/json" } : {},
+      headers: authHeaders(body ? { "content-type": "application/json" } : {}),
       body: body ? JSON.stringify(body) : undefined,
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); });
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); });
   };
 
   // ---- tabs ----
@@ -308,9 +331,11 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
   };
   var loadLogs = function () {
     var clean = document.getElementById("clean").checked;
-    fetch(clean ? "/logs?clean=1" : "/logs").then(function (r) { return r.json(); }).then(function (d) {
-      window.__entries = d.entries || []; renderLogs();
-    }).catch(function () {});
+    fetch(clean ? "/logs?clean=1" : "/logs", { headers: authHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        window.__entries = d.entries || []; renderLogs();
+      }).catch(function () {});
   };
   document.getElementById("t-refresh").onclick = loadLogs;
   document.getElementById("onlyPii").onchange = renderLogs;
@@ -323,8 +348,27 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
   document.getElementById("auto").onchange = setAuto;
 
   // ---- boot ----
-  api("/api/state").then(function (r) { renderState(r.j); });
-  loadLogs(); setAuto();
+  loadToken();
+  document.getElementById("auth-save").onclick = function () {
+    var v = document.getElementById("auth-token").value.trim();
+    if (!v) return;
+    sessionStorage.setItem(TOKEN_KEY, v);
+    adminToken = v;
+    document.getElementById("auth-wrap").style.display = "none";
+    boot();
+  };
+  var boot = function () {
+    api("/api/state").then(function (r) {
+      if (!r.ok) {
+        showAuth(r.status === 401 ? "Unauthorized — paste GATEWAY_ADMIN_TOKEN" : "Failed to load state");
+        return;
+      }
+      document.getElementById("hdr").innerHTML = "<b>" + (r.j.rules || []).length + "</b> rules";
+      renderState(r.j);
+    });
+    loadLogs(); setAuto();
+  };
+  boot();
 })();
 </script>
 </body>

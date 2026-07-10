@@ -80,7 +80,12 @@ test("failure: health-check hook exits non-zero against a dead gateway (no bypas
 // --- CONFIG: configure-clients writes correct Cursor hook shape ----------------
 test("config: configure-clients writes Cursor MCP + fail-closed session hooks only", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-cfg-"));
-  const env = { CURSOR_CONFIG_DIR: tmp, CLAUDE_CONFIG_DIR: path.join(tmp, "claude") };
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  const env = {
+    CURSOR_CONFIG_DIR: tmp,
+    CLAUDE_CONFIG_DIR: path.join(tmp, "claude"),
+    GATEWAY_STATE_DIR: state,
+  };
   try {
     const { code } = await runNode(SERVICE, env, "configure-clients");
     assert.equal(code, 0);
@@ -98,25 +103,84 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
     assert.match(claude.hooks.SessionStart?.[0]?.hooks?.[0]?.command ?? "", /claude-session-hook\.mjs/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(state, { recursive: true, force: true });
+  }
+});
+test("config: init-env writes ~/.secure-llm-gateway/.env and env-ref mcp header", async () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-env-"));
+  const cursor = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-env-"));
+  const claude = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "claude-env-")), "claude");
+  const remote = "https://secure-gateway.example.onrender.com";
+  const env = { GATEWAY_STATE_DIR: state, CURSOR_CONFIG_DIR: cursor, CLAUDE_CONFIG_DIR: claude };
+  try {
+    const { code } = await runNode(
+      SERVICE,
+      env,
+      "init-env",
+      "--token",
+      "secret-token",
+      "--remote-url",
+      remote,
+    );
+    assert.equal(code, 0);
+    const body = fs.readFileSync(path.join(state, ".env"), "utf8");
+    assert.match(body, /GATEWAY_MCP_TOKEN=secret-token/);
+    assert.match(body, /GATEWAY_PUBLIC_URL=https:\/\/secure-gateway\.example\.onrender\.com/);
+    const mode = fs.statSync(path.join(state, ".env")).mode & 0o777;
+    assert.equal(mode, 0o600);
+    const mcp = JSON.parse(fs.readFileSync(path.join(cursor, "mcp.json"), "utf8"));
+    assert.equal(mcp.mcpServers["secure-gateway"].command, process.execPath);
+    assert.match(mcp.mcpServers["secure-gateway"].args[0], /mcp-remote-bridge\.mjs$/);
+    assert.doesNotMatch(JSON.stringify(mcp), /secret-token/, "token must not appear in client config");
+  } finally {
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(cursor, { recursive: true, force: true });
+    fs.rmSync(path.dirname(claude), { recursive: true, force: true });
   }
 });
 
-// --- CONFIG: configure-cursor --remote-url writes HTTPS MCP + token header --------
-test("config: configure-cursor --remote-url writes remote MCP + token header", async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-remote-"));
+// --- CONFIG: configure-claude --remote-url sets Anthropic base + remote health hook -
+test("config: configure-claude --remote-url sets ANTHROPIC_BASE_URL + remote health hook", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claude-remote-"));
   const remote = "https://secure-gateway.example.onrender.com";
-  const env = { CURSOR_CONFIG_DIR: tmp, GATEWAY_PUBLIC_URL: remote };
+  const env = {
+    CLAUDE_CONFIG_DIR: path.join(tmp, "claude"),
+    GATEWAY_STATE_DIR: path.join(tmp, "state"),
+    GATEWAY_MCP_TOKEN: "test-token",
+  };
+  try {
+    const { code } = await runNode(SERVICE, env, "configure-claude", "--remote-url", remote);
+    assert.equal(code, 0);
+    const claude = JSON.parse(fs.readFileSync(path.join(tmp, "claude", "settings.json"), "utf8"));
+    assert.equal(claude.env.ANTHROPIC_BASE_URL, remote);
+    const cmd = claude.hooks.SessionStart?.[0]?.hooks?.[0]?.command ?? "";
+    assert.match(cmd, /GATEWAY_PUBLIC_URL=https:\/\/secure-gateway\.example\.onrender\.com/);
+    assert.match(cmd, /health-check\.mjs/);
+    assert.doesNotMatch(cmd, /claude-session-hook\.mjs/, "remote skips local gateway start");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// --- CONFIG: configure-cursor --remote-url writes stdio bridge + remote hooks ----
+test("config: configure-cursor --remote-url writes stdio bridge + remote hooks", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-remote-"));
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-cursor-"));
+  const remote = "https://secure-gateway.example.onrender.com";
+  const env = { CURSOR_CONFIG_DIR: tmp, GATEWAY_STATE_DIR: state, GATEWAY_PUBLIC_URL: remote };
   try {
     const { code } = await runNode(SERVICE, env, "configure-cursor", "--remote-url", remote);
     assert.equal(code, 0);
     const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
     const hooks = JSON.parse(fs.readFileSync(path.join(tmp, "hooks.json"), "utf8"));
-    assert.equal(mcp.mcpServers["secure-gateway"].url, `${remote}/mcp`);
-    assert.equal(mcp.mcpServers["secure-gateway"].headers["x-gateway-token"], "${env:GATEWAY_MCP_TOKEN}");
+    assert.equal(mcp.mcpServers["secure-gateway"].command, process.execPath);
+    assert.match(mcp.mcpServers["secure-gateway"].args[0], /mcp-remote-bridge\.mjs$/);
+    assert.equal(mcp.mcpServers["secure-gateway"].url, undefined);
     assert.match(hooks.hooks.sessionStart[0].command, /GATEWAY_PUBLIC_URL=https/);
     assert.equal(hooks.hooks.beforeMCPExecution[0].matcher, "secure-gateway");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(state, { recursive: true, force: true });
   }
 });
 

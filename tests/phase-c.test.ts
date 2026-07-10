@@ -425,6 +425,26 @@ test("hardening/edge: remote MCP requires admin token", async () => {
   }
 });
 
+test("hardening/edge: remote console /api/state requires token then returns rules", async () => {
+  const server = createGatewayServer({ remoteMode: true, adminToken: "remote-secret" });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const denied = await fetch(`${base}/api/state`);
+    assert.equal(denied.status, 401);
+
+    const ok = await fetch(`${base}/api/state`, {
+      headers: { "x-gateway-token": "remote-secret" },
+    });
+    assert.equal(ok.status, 200);
+    const st = (await ok.json()) as { rules: unknown[] };
+    assert.ok(st.rules.length >= 10, "default rules should be listed");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
+  }
+});
+
 // EDGE — the gateway binds loopback only by default, never 0.0.0.0 (PRD §3 perimeter).
 test("hardening/edge: default host is 127.0.0.1, never 0.0.0.0", async () => {
   assert.equal(loadConfig().host, "127.0.0.1");
