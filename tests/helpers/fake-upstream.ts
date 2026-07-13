@@ -53,6 +53,57 @@ export async function startFakeUpstream(): Promise<FakeUpstream> {
         return;
       }
 
+      // Anthropic Messages JSON (Cursor translate path). Embeds the mock email
+      // so outbound redaction has something to scrub.
+      if (mode === "anthropic-json") {
+        const ap = JSON.stringify({
+          id: "msg_fake_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          content: [{ type: "text", text: `sure — reach me at ${MOCK_PII_EMAIL} anytime` }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 11, output_tokens: 7 },
+        });
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(ap)),
+        });
+        res.end(ap);
+        return;
+      }
+
+      // Anthropic Messages SSE. The mock email is split across
+      // content_block_delta events (PII on a chunk boundary).
+      if (mode === "anthropic-sse") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const ev = (event: string, data: unknown) =>
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        ev("message_start", {
+          type: "message_start",
+          message: { id: "msg_fake_2", type: "message", role: "assistant", content: [] },
+        });
+        ev("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        });
+        const adelta = (text: string) =>
+          ev("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text },
+          });
+        adelta("reply from mock.per");
+        adelta("son@fake-le");
+        adelta("ak.com ok");
+        ev("content_block_stop", { type: "content_block_stop", index: 0 });
+        ev("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" } });
+        ev("message_stop", { type: "message_stop" });
+        res.end();
+        return;
+      }
+
       const payload = JSON.stringify({
         id: "resp-1",
         reply: `sure — reach me at ${MOCK_PII_EMAIL} anytime`,

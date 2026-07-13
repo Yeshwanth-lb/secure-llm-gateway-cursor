@@ -21,6 +21,7 @@ import {
 const PID_FILE = path.join(STATE_DIR, "gateway.pid");
 const CLAUDE_HOOK = path.join(REPO_ROOT, "scripts", "claude-session-hook.mjs");
 const CURSOR_HOOK = path.join(REPO_ROOT, "scripts", "cursor-gateway-hook.mjs");
+const CURSOR_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-redact-hook.mjs");
 const NODE = process.execPath;
 const NODE_ARGS = ["--experimental-strip-types", ENTRY];
 
@@ -238,6 +239,10 @@ function configureCursor() {
   }));
 
   const hooksFile = path.join(cursorDir(), "hooks.json");
+  // Block-if-PII gate (Phase K): Cursor's native read/prompt hooks can only
+  // allow/deny (no content rewrite), so this DETECTS PII via the gateway and
+  // blocks the read/prompt when found. All fail-closed.
+  const redactHook = `${NODE} ${CURSOR_REDACT_HOOK}`;
   // No matcher: Cursor may label the server `user-secure-gateway`; the hook
   // script filters to our gateway and allows every other MCP through.
   writeJson(hooksFile, {
@@ -245,10 +250,16 @@ function configureCursor() {
     hooks: {
       sessionStart: [{ command: hook, failClosed: true }],
       beforeMCPExecution: [{ command: hook, failClosed: true }],
+      beforeSubmitPrompt: [{ command: redactHook, failClosed: true }],
+      beforeReadFile: [{ command: redactHook, failClosed: true }],
+      beforeTabFileRead: [{ command: redactHook, failClosed: true }],
     },
   });
 
-  log(`configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution, fail-closed)`);
+  log(
+    `configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution + ` +
+      `block-if-PII on beforeSubmitPrompt/beforeReadFile/beforeTabFileRead, fail-closed)`,
+  );
 }
 
 function configureClients() {

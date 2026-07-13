@@ -8,13 +8,19 @@ import https from "node:https";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GatewayConfig } from "./config.ts";
-import type { RouteResult, LogEntry } from "./contracts.ts";
+import type { Provider, RouteResult, LogEntry } from "./contracts.ts";
 import { buildForwardHeaders } from "./routing.ts";
 import { redactJson, redactText } from "./redaction.ts";
 import { StreamRedactor } from "./stream-redactor.ts";
 import { trafficLog } from "./traffic-log.ts";
 import { sendJson } from "./http-utils.ts";
 import { extractModel, isModelBlocked } from "./model-policy.ts";
+import {
+  openaiToAnthropicRequest,
+  anthropicToOpenAIResponse,
+  AnthropicToOpenAISSE,
+  shouldTranslate,
+} from "./openai-anthropic-shim.ts";
 
 /** Cap a snapshot string; cap <= 0 means unlimited. */
 const snap = (s: string, cap: number): string => (cap > 0 ? s.slice(0, cap) : s);
@@ -160,25 +166,48 @@ export async function proxyRequest(
   const started = Date.now();
   const method = req.method ?? "GET";
   const path = sanitizePath(req.url ?? "/"); // strip secret query params before logging
-  const reqCt = req.headers["content-type"];
+  let reqCt = req.headers["content-type"];
+  const nowSeconds = Math.floor(started / 1000);
+  const chunkId = `chatcmpl-${randomUUID()}`;
 
-  // --- inbound scrub (before any byte leaves the machine) --------------------
-  const inbound = scrub(bodyBuf.toString("utf8"), reqCt, "inbound");
-  const cleanBody = Buffer.from(inbound.text, "utf8");
-  const fwdHeaders = buildForwardHeaders(req, route);
-  const model = extractModel(route.provider, route.forwardPath, bodyBuf.toString("utf8"));
+  // --- routing decision: translate by MODEL NAME on a shared endpoint --------
+  // Cursor exposes ONE global "Override OpenAI Base URL", so GPT vs Claude cannot
+  // be split by path — every model call from a Cursor install lands on the same
+  // endpoint. We branch on the request's model id instead: ids that select Claude
+  // (a "claude-*" id, or a configured alias like "claude-via-gateway") are
+  // translated to the Anthropic Messages API and sent to Claude; every other
+  // model passes through to the OpenAI-compatible upstream unchanged. Only
+  // OpenAI-shaped routes are eligible.
+  const rawModel = extractModel(route.provider, route.forwardPath, bodyBuf.toString("utf8"));
+  const translating =
+    route.provider === "openai" && shouldTranslate(rawModel, config.cursorTranslateModels);
+  // Where the (possibly translated) request is forwarded + how it is logged.
+  const fwdRoute: RouteResult = translating
+    ? {
+        provider: "anthropic",
+        upstreamBase: config.upstreams.anthropic.replace(/\/+$/, ""),
+        forwardPath: "/v1/messages",
+      }
+    : route;
+  const logProvider: Provider = fwdRoute.provider;
 
-  const record = (
+  let bodyText = bodyBuf.toString("utf8");
+  let model: string | undefined = rawModel;
+
+  // Log-entry builder (takes the inbound scrub result explicitly so it can be
+  // called from the translate preamble, before the main inbound scrub runs).
+  const recordEntry = (
     status: number,
     streaming: boolean,
     respText: string,
+    inb: { text: string; matched: Record<string, number> },
     outMatched: Record<string, number>,
     blocked = false,
   ): void => {
     const entry: LogEntry = {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
-      provider: route.provider,
+      provider: logProvider,
       model,
       blocked,
       method,
@@ -187,19 +216,79 @@ export async function proxyRequest(
       streaming,
       durationMs: Date.now() - started,
       charCount: {
-        request: inbound.text.length,
+        request: inb.text.length,
         response: respText.length,
-        total: inbound.text.length + respText.length,
+        total: inb.text.length + respText.length,
       },
       payloadSnapshot: {
-        request: snap(inbound.text, config.snapshotChars),
+        request: snap(inb.text, config.snapshotChars),
         response: snap(respText, config.snapshotChars),
       },
-      piiDetected: hasKeys(inbound.matched) || hasKeys(outMatched),
-      matchedRules: { inbound: inbound.matched, outbound: outMatched },
+      piiDetected: hasKeys(inb.matched) || hasKeys(outMatched),
+      matchedRules: { inbound: inb.matched, outbound: outMatched },
     };
     trafficLog.push(entry);
   };
+
+  // --- translate preamble: OpenAI request -> Anthropic Messages --------------
+  // Runs BEFORE the inbound scrub (scrub then sees the translated body) and
+  // BEFORE the model-policy check (so the check tests the RESOLVED Claude model,
+  // not the alias — a blocked Claude model must not be reachable under an alias;
+  // see CURSOR_INTEGRATION_PLAN §5.1).
+  if (translating) {
+    let openaiObj: unknown;
+    try {
+      openaiObj = JSON.parse(bodyText);
+    } catch {
+      openaiObj = null;
+    }
+    try {
+      const t = openaiToAnthropicRequest(openaiObj, {
+        modelMap: config.cursorModelMap,
+        defaultModel: config.cursorDefaultModel,
+        maxTokens: config.cursorMaxTokens,
+      });
+      model = t.model;
+      bodyText = JSON.stringify(t.body);
+      reqCt = "application/json";
+    } catch (e) {
+      // Structurally invalid OpenAI request -> clean 400 in OpenAI error shape,
+      // logged, nothing forwarded.
+      const inb = scrub(bodyText, "application/json", "inbound");
+      recordEntry(400, false, "", inb, {}, false);
+      sendJson(res, 400, {
+        error: { message: `Invalid request: ${(e as Error).message}`, type: "invalid_request_error" },
+      });
+      return;
+    }
+  }
+
+  // --- inbound scrub (before any byte leaves the machine) --------------------
+  const inbound = scrub(bodyText, reqCt, "inbound");
+  const cleanBody = Buffer.from(inbound.text, "utf8");
+  const fwdHeaders = buildForwardHeaders(req, fwdRoute);
+  if (translating) {
+    // Auth swap: drop the client's OpenAI bearer; present server-side Anthropic
+    // auth so the real key never touches the client. Fall back to the incoming
+    // bearer token if no server key is configured (best effort).
+    const incomingAuth = Array.isArray(req.headers["authorization"])
+      ? req.headers["authorization"][0]
+      : req.headers["authorization"];
+    const bearer = typeof incomingAuth === "string" ? incomingAuth.replace(/^Bearer\s+/i, "") : "";
+    delete fwdHeaders["authorization"];
+    const key = config.anthropicApiKey || bearer;
+    if (key) fwdHeaders["x-api-key"] = key;
+    fwdHeaders["anthropic-version"] = config.anthropicVersion;
+    fwdHeaders["content-type"] = "application/json";
+  }
+
+  const record = (
+    status: number,
+    streaming: boolean,
+    respText: string,
+    outMatched: Record<string, number>,
+    blocked = false,
+  ): void => recordEntry(status, streaming, respText, inbound, outMatched, blocked);
 
   // --- model policy: block before forwarding (nothing leaves the machine) ----
   if (isModelBlocked(model)) {
@@ -213,7 +302,7 @@ export async function proxyRequest(
   }
 
   // --- forward ---------------------------------------------------------------
-  const call = forward(route, method, fwdHeaders, cleanBody, config.upstreamTimeoutMs);
+  const call = forward(fwdRoute, method, fwdHeaders, cleanBody, config.upstreamTimeoutMs);
   // Abort upstream work if the client goes away — don't keep a socket + buffer
   // alive for a response nobody will read (§5).
   const onClientClose = (): void => {
@@ -239,7 +328,13 @@ export async function proxyRequest(
 
   // --- outbound scrub: streaming SSE ----------------------------------------
   if (isSse(upCt)) {
-    const sr = new StreamRedactor(route.provider, config.streamHoldbackChars);
+    // Redact on the upstream provider's framing first; for the Cursor translate
+    // path, reframe the *already-redacted* Anthropic SSE into OpenAI chunks.
+    const sr = new StreamRedactor(logProvider, config.streamHoldbackChars);
+    const reframer = translating
+      ? new AnthropicToOpenAISSE(model ?? "claude", nowSeconds, chunkId)
+      : null;
+    const pipe = (redacted: Buffer): Buffer => (reframer ? reframer.push(redacted) : redacted);
     const headers = respHeaders(upstream.headers);
     res.writeHead(status, headers);
     let respText = "";
@@ -250,10 +345,11 @@ export async function proxyRequest(
       if (cap <= 0 || respText.length < cap) respText += buf.toString("utf8");
     };
     upstream.on("data", (c: Buffer) =>
-      emit(sr.push(Buffer.isBuffer(c) ? c : Buffer.from(c))),
+      emit(pipe(sr.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))),
     );
     upstream.on("end", () => {
-      emit(sr.flush());
+      emit(pipe(sr.flush()));
+      if (reframer) emit(reframer.flush());
       res.end();
       record(status, true, respText, { ...sr.matched });
     });
@@ -288,6 +384,48 @@ export async function proxyRequest(
   upstream.on("end", () => {
     if (overCap) return;
     const raw = Buffer.concat(chunks).toString("utf8");
+
+    // Cursor translate path: redact the Anthropic response, then reshape to the
+    // OpenAI chat.completion envelope Cursor expects.
+    if (translating) {
+      let anthObj: any = null;
+      try {
+        anthObj = JSON.parse(raw);
+      } catch {
+        anthObj = null;
+      }
+      let outText: string;
+      let outMatched: Record<string, number> = {};
+      if (anthObj && anthObj.type === "message") {
+        const red = redactJson(anthObj, "outbound");
+        outMatched = red.matched;
+        const openai = anthropicToOpenAIResponse(red.value, model ?? "claude", nowSeconds);
+        if (!(openai as any).id) (openai as any).id = chunkId;
+        outText = JSON.stringify(openai);
+      } else {
+        // Upstream error / non-message body: scrub, then wrap in an OpenAI error
+        // shape so Cursor surfaces it cleanly (never forward raw).
+        const scrubbed = scrub(raw, upCt, "outbound");
+        outMatched = scrubbed.matched;
+        let errObj: any = null;
+        try {
+          errObj = JSON.parse(scrubbed.text);
+        } catch {
+          errObj = null;
+        }
+        const msg = errObj?.error?.message ?? errObj?.error ?? scrubbed.text ?? "upstream error";
+        outText = JSON.stringify({ error: { message: String(msg), type: "upstream_error" } });
+      }
+      const outBuf = Buffer.from(outText, "utf8");
+      const headers = respHeaders(upstream.headers);
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(outBuf.length);
+      if (!res.headersSent) res.writeHead(status, headers);
+      res.end(outBuf);
+      record(status, false, outText, outMatched);
+      return;
+    }
+
     const out = scrub(raw, upCt, "outbound");
     const outBuf = Buffer.from(out.text, "utf8");
     const headers = respHeaders(upstream.headers);

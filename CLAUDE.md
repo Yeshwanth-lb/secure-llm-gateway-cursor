@@ -188,9 +188,9 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-10
-**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅
-**Overall:** Core gateway, console, model policy, clean view, and global client integration complete. Suite 81/81 green.
+**Last updated:** 2026-07-13
+**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅
+**Overall:** Core gateway, console, model policy, clean view, global client integration, and full Cursor PII redaction complete. Suite 87/87 green.
 
 **Operational bootstrap (verified 2026-07-10):** The single bootstrap command is
 `node scripts/gateway-service.mjs install` — it registers the per-user service, runs
@@ -240,6 +240,38 @@ redacted hook messages, while public IPv4 addresses still redact.
 (catches short payloads like `e30`); signature allows optional `=` padding. Added
 multi-JWT and split-stream tests.
 
+**Cursor real redaction — Phases J + K (2026-07-13):** Cursor now gets full
+bidirectional redaction of chat/agent traffic (not just MCP inspection). Design
+decisions worth remembering:
+- **Single endpoint, model-name routing (NOT two endpoints).** Cursor exposes ONE
+  global "Override OpenAI Base URL", so a second gateway path can never be reached
+  alongside the first from one Cursor install. Point Cursor's OpenAI base URL at
+  `http://127.0.0.1:8000/openai`; the proxy branches on the request's `model` id:
+  a `claude-*` id or a configured alias (`CURSOR_TRANSLATE_MODELS`, default
+  `claude-via-gateway`) → translate to the Anthropic Messages API and forward to
+  Claude; any other model → pass through to OpenAI unchanged. See
+  `shouldTranslate()` in `src/openai-anthropic-shim.ts` and the decision block in
+  `src/proxy.ts`.
+- **Translation shim** (`src/openai-anthropic-shim.ts`): `openaiToAnthropicRequest`,
+  `anthropicToOpenAIResponse`, and `AnthropicToOpenAISSE` (streaming reframer that
+  runs AFTER the existing StreamRedactor, so split-PII holdback is reused). Redaction
+  engine untouched — it scrubs whatever body is present. Auth swap: client's OpenAI
+  bearer dropped, server-side `ANTHROPIC_API_KEY` + `anthropic-version` added (real
+  key never touches the client). Model map `CURSOR_MODEL_MAP` resolves alias → real
+  Claude id; `CURSOR_DEFAULT_MODEL` / `CURSOR_MAX_TOKENS` fill gaps.
+- **Model-policy ordering fix:** the block check now runs on the RESOLVED Claude
+  model, so a blocked Claude model can't slip through under an OpenAI alias.
+- **Hooks are block-only (Phase K).** Cursor's `beforeReadFile`/`beforeTabFileRead`/
+  `beforeSubmitPrompt` can only allow/deny — they CANNOT rewrite content (verified
+  against cursor.com/docs/hooks). `scripts/cursor-redact-hook.mjs` DETECTS PII via
+  `POST /detect` (loopback-gated, uses the live rule set, never logs raw text) and
+  DENIES when found; fail-closed on any error. Tab autocomplete file *reads* can be
+  blocked but not scrubbed; Apply-from-Chat is uncoverable (Cursor's own backend).
+- **Test note:** Phase K tests must spawn the hook with async `spawn`, not
+  `spawnSync` — `spawnSync` blocks the parent event loop and deadlocks the
+  in-process gateway serving `/detect`.
+- Full rationale + limitations: `CURSOR_INTEGRATION_PLAN.md`.
+
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|
@@ -253,6 +285,8 @@ multi-JWT and split-stream tests.
 | D — Traffic inspector | ✅ Done | console shell + aliases + `/logs` polling | ✅ 4/4 | `tests/phase-d.test.ts`. |
 | E — Control-plane console + `/api` | ✅ Done | MCP/browser negotiation + live rules/model controls | ✅ 9/9 | Admin-token gate when `GATEWAY_ADMIN_TOKEN` set. `tests/phase-e.test.ts`. |
 | I — Cross-platform integration | ✅ Done | shared-log aggregation / fail-closed health hook / global Cursor config / concurrent start | ✅ 6/6 | Loopback-only `http` MCP for Cursor + Claude; hook skips non-secure-gateway MCP. `tests/phase-i.test.ts`. |
+| J — Cursor OpenAI↔Anthropic shim | ✅ Done | claude-alias translates + gpt passes through (one endpoint) / missing-messages 400 + blocked-alias 403 / streaming split-PII reframed to OpenAI | ✅ 3/3 | `src/openai-anthropic-shim.ts`. Model-name routing on the shared `/openai` endpoint (Cursor has one global base-URL override). Model-policy ordering fixed (policy checks the RESOLVED Claude model). `tests/phase-j.test.ts`. |
+| K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed | ✅ 3/3 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (Cursor native hooks can't rewrite). `tests/phase-k.test.ts`. |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)

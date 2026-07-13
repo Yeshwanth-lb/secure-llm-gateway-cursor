@@ -6,7 +6,7 @@ import { loadConfig } from "./config.ts";
 import { sendJson, readBody, BodyTooLargeError } from "./http-utils.ts";
 import { resolveRoute } from "./routing.ts";
 import { proxyRequest } from "./proxy.ts";
-import { getActiveRuleInfo } from "./redaction.ts";
+import { getActiveRuleInfo, redactText } from "./redaction.ts";
 import { trafficLog } from "./traffic-log.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
@@ -144,7 +144,7 @@ async function handleRequest(
 
   // Control plane is guarded (§5): loopback browser Origin (or admin token) only.
   const controlPath =
-    path === "/logs" || path === "/rules" || isApiPath(path) || isMcpPath(path);
+    path === "/logs" || path === "/rules" || path === "/detect" || isApiPath(path) || isMcpPath(path);
   if (controlPath && !controlPlaneAllowed(req, config)) {
     sendJson(res, 403, { error: "Origin not allowed" });
     return;
@@ -173,6 +173,22 @@ async function handleRequest(
       return;
     }
     sendJson(res, 400, { error: "Failed to read request body" });
+    return;
+  }
+
+  // Local PII detection for Cursor hooks (block-if-PII gate). Loopback-gated
+  // above. This endpoint uses the LIVE rule set (incl. UI-added custom rules)
+  // and NEVER logs — it returns only match counts, so no raw PII is persisted.
+  if (method === "POST" && path === "/detect") {
+    let text = "";
+    try {
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      if (j && typeof j.text === "string") text = j.text;
+    } catch {
+      /* empty/invalid -> treated as no text */
+    }
+    const { matched } = redactText(text, "inbound");
+    sendJson(res, 200, { matched, piiDetected: Object.keys(matched).length > 0 });
     return;
   }
 

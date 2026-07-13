@@ -108,6 +108,36 @@ export function getJson(pathname, headers = {}) {
   });
 }
 
+/** POST JSON to a gateway endpoint. Resolves {status, json} or rejects. */
+export function postJson(pathname, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(pathname, BASE_URL.endsWith("/") ? BASE_URL : BASE_URL + "/");
+    const lib = url.protocol === "https:" ? https : http;
+    const body = Buffer.from(JSON.stringify(payload ?? {}), "utf8");
+    const req = lib.request(
+      url,
+      {
+        method: "POST",
+        timeout: 8000,
+        headers: { "content-type": "application/json", "content-length": body.length, ...headers },
+      },
+      (res) => {
+        let buf = "";
+        res.on("data", (d) => (buf += d));
+        res.on("end", () => {
+          let json = null;
+          try { json = JSON.parse(buf); } catch { /* non-json */ }
+          resolve({ status: res.statusCode, json });
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 /** Read the persisted install id, or null if not yet created. */
 export function readInstallId() {
   try {

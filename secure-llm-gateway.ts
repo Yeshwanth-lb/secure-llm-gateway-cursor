@@ -48,6 +48,13 @@ export {
   removeAllowlistEntry,
 } from "./src/redaction.ts";
 export { StreamRedactor } from "./src/stream-redactor.ts";
+export {
+  openaiToAnthropicRequest,
+  anthropicToOpenAIResponse,
+  AnthropicToOpenAISSE,
+  resolveModel,
+  shouldTranslate,
+} from "./src/openai-anthropic-shim.ts";
 export { resolveRoute, buildForwardHeaders } from "./src/routing.ts";
 export { trafficLog } from "./src/traffic-log.ts";
 export { proxyRequest } from "./src/proxy.ts";

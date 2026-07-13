@@ -20,6 +20,56 @@ export interface GatewayConfig {
   /** Stable identity for this gateway deployment, surfaced on /healthz. */
   installId: string;
   upstreams: Record<Provider, string>;
+  /** Cursor translation path (OpenAI->Anthropic). Server-side Anthropic auth so
+   *  the real key never touches the client; model aliasing; token/version defaults. */
+  anthropicApiKey: string;
+  anthropicVersion: string;
+  /** Map an incoming (alias) model id to a real Claude model, for translated calls. */
+  cursorModelMap: Record<string, string>;
+  /** Model ids that trigger translation to Anthropic on the shared OpenAI endpoint.
+   *  ("claude-*" ids always translate; these are extra non-claude aliases.) */
+  cursorTranslateModels: string[];
+  /** Fallback Claude model when a translated id isn't in the map and isn't a Claude id. */
+  cursorDefaultModel: string;
+  /** Anthropic requires max_tokens; used when the OpenAI request omits it. */
+  cursorMaxTokens: number;
+}
+
+// Cursor exposes ONE global "Override OpenAI Base URL", so a single gateway
+// endpoint serves both GPT (pass-through) and Claude (translated). Routing is by
+// MODEL NAME: a "claude-*" id or one of these aliases -> translate to Anthropic;
+// anything else -> pass through to OpenAI. `cursorModelMap` then resolves the
+// alias to a real Claude model.
+const DEFAULT_CURSOR_TRANSLATE_MODELS = ["claude-via-gateway"];
+
+/** Alias -> real Claude model; overridable via CURSOR_MODEL_MAP (JSON). */
+const DEFAULT_CURSOR_MODEL_MAP: Record<string, string> = {
+  "claude-via-gateway": "claude-sonnet-5",
+};
+
+function parseCsv(raw: string | undefined, fallback: string[]): string[] {
+  if (!raw || raw.trim() === "") return [...fallback];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function parseModelMap(raw: string | undefined): Record<string, string> {
+  if (!raw || raw.trim() === "") return { ...DEFAULT_CURSOR_MODEL_MAP };
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const out: Record<string, string> = {};
+      for (const k of Object.keys(obj)) {
+        if (typeof (obj as any)[k] === "string") out[k.toLowerCase()] = (obj as any)[k];
+      }
+      return out;
+    }
+  } catch {
+    /* malformed -> fall back to defaults */
+  }
+  return { ...DEFAULT_CURSOR_MODEL_MAP };
 }
 
 /** Loopback hosts the gateway is permitted to bind. Never bind a routable address. */
@@ -70,6 +120,15 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
       gemini: process.env.GEMINI_UPSTREAM ?? "https://generativelanguage.googleapis.com",
       openai: process.env.OPENAI_COMPAT_UPSTREAM ?? "https://api.openai.com",
     },
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+    anthropicVersion: process.env.ANTHROPIC_VERSION ?? "2023-06-01",
+    cursorModelMap: parseModelMap(process.env.CURSOR_MODEL_MAP),
+    cursorTranslateModels: parseCsv(
+      process.env.CURSOR_TRANSLATE_MODELS,
+      DEFAULT_CURSOR_TRANSLATE_MODELS,
+    ),
+    cursorDefaultModel: process.env.CURSOR_DEFAULT_MODEL ?? "claude-sonnet-5",
+    cursorMaxTokens: toInt(process.env.CURSOR_MAX_TOKENS, 4096),
   };
   const merged: GatewayConfig = {
     ...base,
