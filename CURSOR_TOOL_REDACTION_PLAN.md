@@ -1,6 +1,6 @@
 # Phase L — Cursor tool-data redaction via `preToolUse` / `postToolUse`
 
-**Status:** Proposed (not built)
+**Status:** ✅ Implemented 2026-07-14 (`POST /redact` + `scripts/cursor-tool-redact-hook.mjs` + `tests/phase-l.test.ts`, 3/3; wired in `configure-cursor`). Remaining: one live Cursor tool-call to confirm the exact `preToolUse`/`postToolUse` field names (run with `CURSOR_HOOK_CAPTURE=1`) — the hook accepts documented + alias keys defensively until then.
 **Author:** Yeshwanth (with Claude Code)
 **Depends on:** Phase K (block hooks), Phase A1/A2 (redaction engine), gateway `/detect`
 **Design authority:** this file + CLAUDE.md §3 (TDD + phase gate). If in doubt, CLAUDE.md wins.

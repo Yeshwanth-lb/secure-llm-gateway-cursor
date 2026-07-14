@@ -6,7 +6,7 @@ import { loadConfig } from "./config.ts";
 import { sendJson, readBody, BodyTooLargeError } from "./http-utils.ts";
 import { resolveRoute } from "./routing.ts";
 import { proxyRequest } from "./proxy.ts";
-import { getActiveRuleInfo, redactText } from "./redaction.ts";
+import { getActiveRuleInfo, redactText, redactJson } from "./redaction.ts";
 import { trafficLog } from "./traffic-log.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
@@ -169,7 +169,8 @@ async function handleRequest(
 
   // Control plane is guarded (§5): loopback browser Origin (or admin token) only.
   const controlPath =
-    path === "/logs" || path === "/rules" || path === "/detect" || isApiPath(path) || isMcpPath(path);
+    path === "/logs" || path === "/rules" || path === "/detect" || path === "/redact" ||
+    isApiPath(path) || isMcpPath(path);
   if (controlPath && !controlPlaneAllowed(req, config)) {
     sendJson(res, 403, { error: "Origin not allowed" });
     return;
@@ -214,6 +215,34 @@ async function handleRequest(
     }
     const { matched } = redactText(text, "inbound");
     sendJson(res, 200, { matched, piiDetected: Object.keys(matched).length > 0 });
+    return;
+  }
+
+  // Local PII SCRUB for Cursor rewrite hooks (preToolUse/postToolUse, Phase L).
+  // Unlike /detect this returns the REDACTED content so the hook can forward a
+  // clean payload. Loopback-gated above; NEVER logs (raw text stays in memory
+  // only for the duration of the call). Accepts { text } (string) or { value }
+  // (arbitrary JSON — every string leaf scrubbed via redactJson).
+  if (method === "POST" && path === "/redact") {
+    let body: { text?: unknown; value?: unknown } = {};
+    try {
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      if (j && typeof j === "object") body = j;
+    } catch {
+      /* empty/invalid -> treated as no content */
+    }
+    if (typeof body.text === "string") {
+      const { text, matched } = redactText(body.text, "inbound");
+      sendJson(res, 200, { redacted: text, matched, piiDetected: Object.keys(matched).length > 0 });
+      return;
+    }
+    if (body.value !== undefined) {
+      const { value, matched } = redactJson(body.value, "inbound");
+      sendJson(res, 200, { redacted: value, matched, piiDetected: Object.keys(matched).length > 0 });
+      return;
+    }
+    // Nothing to scrub -> echo empty, no PII.
+    sendJson(res, 200, { redacted: "", matched: {}, piiDetected: false });
     return;
   }
 

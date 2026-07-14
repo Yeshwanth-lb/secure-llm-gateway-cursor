@@ -97,7 +97,11 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
     assert.equal(mcp.mcpServers["secure-gateway"].url, "http://127.0.0.1:8000/mcp");
     assert.ok(hooks.hooks.sessionStart?.[0]?.failClosed, "sessionStart is fail-closed");
     assert.ok(hooks.hooks.beforeMCPExecution?.[0]?.failClosed, "beforeMCP is fail-closed");
-    assert.equal(hooks.hooks.preToolUse, undefined, "no per-tool health hook");
+    // preToolUse/postToolUse are the Phase L tool-data SCRUB hooks (rewrite),
+    // not a per-tool health probe — they point at cursor-tool-redact-hook.
+    assert.match(hooks.hooks.preToolUse?.[0]?.command ?? "", /cursor-tool-redact-hook\.mjs/);
+    assert.match(hooks.hooks.postToolUse?.[0]?.command ?? "", /cursor-tool-redact-hook\.mjs/);
+    assert.ok(hooks.hooks.preToolUse?.[0]?.failClosed, "preToolUse fail-closed");
     assert.match(hooks.hooks.sessionStart[0].command, /cursor-gateway-hook\.mjs/);
     assert.doesNotMatch(hooks.hooks.sessionStart[0].command, /^GATEWAY_PUBLIC_URL=/, "no shell env prefix");
     assert.equal(hooks.hooks.beforeMCPExecution?.[0]?.matcher, undefined, "filter in-script (user- prefix)");
@@ -105,6 +109,44 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
 
     const claude = JSON.parse(fs.readFileSync(path.join(tmp, "claude", "settings.json"), "utf8"));
     assert.match(claude.hooks.SessionStart?.[0]?.hooks?.[0]?.command ?? "", /claude-session-hook\.mjs/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(state, { recursive: true, force: true });
+  }
+});
+
+// Regression: migrating from the old stdio bridge, configure-cursor must REPLACE
+// our server entry with a fresh HTTP-only object, not deep-merge stale stdio keys
+// (command/args/envFile) beside the new { type:"http", url }. Other servers kept.
+test("config: configure-cursor replaces a stale stdio secure-gateway entry (no leftover keys)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-cfg-"));
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  // Pre-seed a stdio-shaped entry + an unrelated server that must survive.
+  fs.writeFileSync(path.join(tmp, "mcp.json"), JSON.stringify({
+    mcpServers: {
+      "secure-gateway": { command: "node", args: ["old-bridge.mjs"], envFile: "/tmp/.env" },
+      "other-mcp": { type: "http", url: "http://127.0.0.1:9999/mcp" },
+    },
+  }));
+  const env = {
+    CURSOR_CONFIG_DIR: tmp,
+    CLAUDE_CONFIG_DIR: path.join(tmp, "claude"),
+    GATEWAY_STATE_DIR: state,
+    GATEWAY_ENV_BOOTSTRAPPED: "1",
+  };
+  try {
+    const { code } = await runNode(SERVICE, env, "configure-cursor");
+    assert.equal(code, 0);
+    const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
+    const entry = mcp.mcpServers["secure-gateway"];
+    assert.equal(entry.type, "http");
+    assert.equal(entry.url, "http://127.0.0.1:8000/mcp");
+    assert.equal(entry.command, undefined, "stale stdio command removed");
+    assert.equal(entry.args, undefined, "stale stdio args removed");
+    assert.equal(entry.envFile, undefined, "stale stdio envFile removed");
+    assert.deepEqual(Object.keys(entry).sort(), ["type", "url"], "entry is HTTP-only");
+    // Unrelated server preserved.
+    assert.equal(mcp.mcpServers["other-mcp"]?.url, "http://127.0.0.1:9999/mcp");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(state, { recursive: true, force: true });

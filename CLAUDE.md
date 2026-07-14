@@ -188,9 +188,27 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-13
-**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅
-**Overall:** Core gateway, console, model policy, clean view, global client integration, and full Cursor PII redaction complete. Suite 89/89 green.
+**Last updated:** 2026-07-14
+**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅
+**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Suite 93/93 green.
+
+**Cursor architecture finding (2026-07-14):** Cursor CHAT cannot be routed through a
+loopback gateway — Cursor makes provider calls from its OWN cloud servers and bans
+private-network base URLs ("Access to private networks is forbidden"). Confirmed live
+(gpt-4o probe). So base-URL redaction (Phase J) is unshippable for Cursor chat; the shim
+stays valid for Claude Code / direct callers. Cursor coverage is therefore: block-if-PII
+(K) on prompts/file-reads + tool-data SCRUB (L) on preToolUse/postToolUse. Full writeup:
+`CURSOR_BLOCKER_REPORT.md`, `CURSOR_REDACTION_BRIEF.md`. Hook-capability correction: Cursor
+hooks are NOT all block-only — `preToolUse` (updated_input) and `postToolUse`
+(updated_mcp_tool_output) CAN rewrite; the prompt/file hooks we use are block-only.
+
+**`/models` root-path fix (2026-07-13):** `/models` handler now matches both `/openai`-
+prefixed and bare-root paths (`^/(?:openai/)?(?:v1/)?models$`) — a bare-root Cursor base URL
+404'd validation while chat worked at root. Regression in `tests/phase-j.test.ts`.
+
+**`configure-cursor` merge bug FIXED (2026-07-14):** now writes our MCP entry as a fresh
+HTTP-only object (replace, not deep-merge), so a prior stdio-shaped entry leaves no stale
+`command`/`args`/`envFile` keys; other servers preserved. Regression in `tests/phase-i.test.ts`.
 
 **Operational bootstrap (verified 2026-07-10):** The single bootstrap command is
 `node scripts/gateway-service.mjs install` — it registers the per-user service, runs
@@ -202,12 +220,11 @@ gateway healthy on `127.0.0.1:8000`, `doctor` 11/11 `[OK]`, Claude+Cursor hooks 
 outbound `EMAIL` redaction confirmed end-to-end from a real Claude Code prompt. See
 DEVELOPERS.md §0 Quickstart.
 
-**Known bug — `configure-cursor` merge (2026-07-10):** `configure-cursor` in
-`scripts/gateway-service.mjs` deep-merges into an existing `secure-gateway` entry instead
-of replacing it. Migrating from the old **stdio** entry (the removed
-`mcp-remote-bridge.mjs`) leaves stale `command`/`args`/`envFile` keys alongside the new
-`type: http` + `url`. Cleaned by hand this session; fix should write a fresh HTTP-only
-object when the prior entry is stdio-shaped. Documented in DEVELOPERS.md.
+**~~Known bug~~ FIXED — `configure-cursor` merge (fixed 2026-07-14):** `configure-cursor`
+used to deep-merge into an existing `secure-gateway` entry, leaving stale stdio
+`command`/`args`/`envFile` keys beside the new `type: http` + `url` when migrating from the
+removed `mcp-remote-bridge.mjs`. Now writes our entry as a fresh HTTP-only object (replace,
+not merge); other servers preserved. Regression test in `tests/phase-i.test.ts`.
 
 **Loopback-only (2026-07-10):** All remote/cloud (Render) support was removed. The
 gateway binds `127.0.0.1` only — `loadConfig` throws on any non-loopback `GATEWAY_HOST`
@@ -321,7 +338,8 @@ locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
 | E — Control-plane console + `/api` | ✅ Done | MCP/browser negotiation + live rules/model controls | ✅ 9/9 | Admin-token gate when `GATEWAY_ADMIN_TOKEN` set. `tests/phase-e.test.ts`. |
 | I — Cross-platform integration | ✅ Done | shared-log aggregation / fail-closed health hook / global Cursor config / concurrent start | ✅ 6/6 | Loopback-only `http` MCP for Cursor + Claude; hook skips non-secure-gateway MCP. `tests/phase-i.test.ts`. |
 | J — Cursor OpenAI↔Anthropic shim | ✅ Done | claude-alias translates + gpt passes through (one endpoint) / missing-messages 400 + blocked-alias 403 / streaming split-PII reframed to OpenAI | ✅ 3/3 | `src/openai-anthropic-shim.ts`. Model-name routing on the shared `/openai` endpoint (Cursor has one global base-URL override). Model-policy ordering fixed (policy checks the RESOLVED Claude model). `tests/phase-j.test.ts`. |
-| K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed | ✅ 3/3 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (Cursor native hooks can't rewrite). `tests/phase-k.test.ts`. |
+| K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed | ✅ 3/3 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (these prompt/file hooks can't rewrite). `tests/phase-k.test.ts`. |
+| L — Cursor tool-data scrub | ✅ Done | postToolUse rewrites MCP output (PII→tokens) / gateway-down → preToolUse deny + postToolUse withhold (no raw) / nested input scrubbed, clean input untouched | ✅ 3/3 | `scripts/cursor-tool-redact-hook.mjs` + `POST /redact` (loopback-gated, never logged). Rewrite hooks: `preToolUse.updated_input`, `postToolUse.updated_mcp_tool_output`. Live Cursor field-name capture (`CURSOR_HOOK_CAPTURE=1`) still to confirm. `tests/phase-l.test.ts`. |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)
