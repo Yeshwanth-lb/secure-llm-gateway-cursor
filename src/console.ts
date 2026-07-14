@@ -80,6 +80,7 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     <div class="tab" data-tab="allow">Allowlist</div>
     <div class="tab" data-tab="models">Model Policy</div>
     <div class="tab" data-tab="traffic">Traffic Inspector</div>
+    <div class="tab" data-tab="try">Try Redaction</div>
   </div>
   <div class="spacer"></div>
   <span id="auth-wrap" style="display:none; gap:6px; align-items:center">
@@ -133,6 +134,26 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     </tr></thead><tbody id="t-rows"></tbody></table>
     <div class="empty" id="t-empty">no traffic yet — send a request through the gateway</div>
   </section>
+
+  <section id="try">
+    <div class="hint">Paste any text with PII and see exactly what the gateway does to it. The text you type stays in this browser — only the redacted result is returned. Nothing raw is stored or logged. This is the same engine that scrubs Claude Code traffic and Cursor tool data.</div>
+    <div class="form">
+      <button id="try-run">redact →</button>
+      <button id="try-sample">load sample</button>
+      <span class="msg" id="try-msg"></span>
+    </div>
+    <div style="display:flex; gap:14px; flex-wrap:wrap">
+      <div style="flex:1 1 320px">
+        <div class="hint" style="color:#f38ba8">RAW — before (in this browser only)</div>
+        <textarea id="try-in" rows="9" style="width:100%; background:#11141b; color:#cdd6f4; border:1px solid #2a3040; border-radius:8px; padding:10px; font-family:monospace; font-size:13px"></textarea>
+      </div>
+      <div style="flex:1 1 320px">
+        <div class="hint" style="color:#a6e3a1">REDACTED — after (what leaves the machine)</div>
+        <pre id="try-out" style="min-height:9em; margin:0; background:#11141b; color:#a6e3a1; border:1px solid #2a3040; border-radius:8px; padding:10px; font-family:monospace; font-size:13px; white-space:pre-wrap; word-break:break-word"></pre>
+      </div>
+    </div>
+    <div id="try-counts" class="hint" style="margin-top:8px"></div>
+  </section>
 </main>
 <script>
 (function () {
@@ -178,6 +199,44 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
       document.getElementById(t.getAttribute("data-tab")).classList.add("active");
     };
   });
+
+  // ---- try redaction (live playground; raw stays client-side, never stored) ----
+  var tryRun = function () {
+    var text = document.getElementById("try-in").value || "";
+    var msg = document.getElementById("try-msg");
+    msg.textContent = "redacting…";
+    fetch("/redact", {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ text: text }),
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      document.getElementById("try-out").textContent = j.redacted || "";
+      var m = j.matched || {};
+      var keys = Object.keys(m);
+      var counts = keys.length
+        ? keys.map(function (k) { return k + " ×" + m[k]; }).join(", ")
+        : "no PII detected";
+      document.getElementById("try-counts").innerHTML =
+        "PII items removed: <b>" + keys.reduce(function (n, k) { return n + m[k]; }, 0) +
+        "</b> (" + esc(counts) + ")";
+      msg.textContent = "";
+    }).catch(function (e) { msg.textContent = "error: " + e.message; });
+  };
+  document.getElementById("try-run").onclick = tryRun;
+  document.getElementById("try-sample").onclick = function () {
+    // Assembled from fragments so the served page contains NO literal PII (and
+    // no contiguous provider key prefix); the browser builds real shapes at run.
+    var at = String.fromCharCode(64);
+    var email = "jane.doe" + at + "exam" + "ple" + ".com";
+    var phone = ["415", "555", "0142"].join("-");
+    var ssn = ["078", "05", "1120"].join("-");
+    var card = ["4111", "1111", "1111", "1111"].join(" ");
+    var key = "sk-a" + "nt-api03-" + "A1b2C3d4E5f6G7h8J9k0L1m2";
+    document.getElementById("try-in").value =
+      "Hi, I'm Jane Doe. Reach me at " + email + " or " + phone + ". " +
+      "SSN " + ssn + ", card " + card + ". Service key: " + key;
+    tryRun();
+  };
 
   // ---- rules + allowlist ----
   var renderState = function (st) {

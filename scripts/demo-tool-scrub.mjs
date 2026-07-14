@@ -63,6 +63,21 @@ async function main() {
     process.exit(1);
   }
 
+  // 0) THE PROOF — one plain sentence, raw vs redacted, straight through /redact.
+  const sentence = `Hi, I'm ${EMAIL} — my SSN is ${SSN} and card ${CC}.`;
+  const rr = await new Promise((resolve) => {
+    const data = JSON.stringify({ text: sentence });
+    const req = http.request(
+      { host: HOST, port: PORT, path: "/redact", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } },
+      (res) => { let s = ""; res.on("data", (d) => (s += d)); res.on("end", () => resolve(JSON.parse(s))); },
+    );
+    req.write(data); req.end();
+  });
+  console.log(`${B}PROOF — same text, before vs after the gateway${X}`);
+  console.log(`  ${R}RAW      (on your machine):${X} ${sentence}`);
+  console.log(`  ${G}REDACTED (sent onward):   ${X} ${rr.redacted}`);
+  console.log(`  ${C}PII items removed: ${nRedacted(rr.redacted)}  (${Object.entries(rr.matched).map(([k, v]) => `${k}×${v}`).join(", ")})${X}\n`);
+
   // 1) postToolUse — an MCP tool returns a customer record full of PII.
   console.log(`${B}1) postToolUse${X}  ${D}an MCP tool returns a record containing PII${X}`);
   const toolOutput = JSON.stringify({ content: [{ type: "text", text: `email ${EMAIL}, ssn ${SSN}, card ${CC}` }] });
