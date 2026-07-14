@@ -13,7 +13,16 @@
 // Diagnostics -> stderr; the JSON decision -> stdout. Raw tool data is sent to
 // the loopback gateway only; the gateway never logs it. Set CURSOR_HOOK_CAPTURE=1
 // to dump the raw stdin payload to stderr once, to pin Cursor's live field names.
-import { postJson, BASE_URL, log } from "./lib.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { postJson, BASE_URL, STATE_DIR, log } from "./lib.mjs";
+
+// One-off schema capture: enable by `touch ~/.secure-llm-gateway/hook-capture`
+// (or CURSOR_HOOK_CAPTURE=1). Raw stdin is appended to hook-capture.log so the
+// exact preToolUse/postToolUse field names can be confirmed from a live Cursor
+// tool call. Remove the flag file to stop. Capture only — no effect on scrubbing.
+const CAPTURE_FLAG = path.join(STATE_DIR, "hook-capture");
+const CAPTURE_LOG = path.join(STATE_DIR, "hook-capture.log");
 
 const MAX_STDIN = 2 * 1024 * 1024; // tool outputs can be large
 const WITHHELD = "[tool output withheld: PII gateway unreachable — fail-closed]";
@@ -51,8 +60,11 @@ function pick(obj, keys) {
 
 const raw = await readStdin();
 
-if (process.env.CURSOR_HOOK_CAPTURE === "1") {
-  log(`cursor-tool-redact-hook: RAW STDIN =\n${raw.slice(0, 8192)}`);
+if (process.env.CURSOR_HOOK_CAPTURE === "1" || fs.existsSync(CAPTURE_FLAG)) {
+  try {
+    fs.appendFileSync(CAPTURE_LOG, `\n=== ${new Date().toISOString()} ===\n${raw.slice(0, 16384)}\n`);
+  } catch { /* capture is best-effort */ }
+  log(`cursor-tool-redact-hook: captured raw stdin -> ${CAPTURE_LOG}`);
 }
 
 let ctx;
