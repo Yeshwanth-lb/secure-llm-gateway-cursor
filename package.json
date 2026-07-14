@@ -16,7 +16,8 @@
     "start": "node --experimental-strip-types secure-llm-gateway.ts",
     "dev": "node --experimental-strip-types secure-llm-gateway.ts",
     "stdio": "node dist/secure-llm-gateway.js --stdio",
-    "test": "node --experimental-strip-types --test 'tests/*.test.ts'"
+    "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
+    "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
