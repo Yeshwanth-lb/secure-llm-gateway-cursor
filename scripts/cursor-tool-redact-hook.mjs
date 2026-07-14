@@ -83,7 +83,10 @@ const event = String(ctx.hook_event_name ?? "");
 // Ask the gateway to scrub a text-or-structured payload. Returns the scrubbed
 // value + whether any PII was found. Throws on transport/HTTP error.
 async function scrub(payload) {
-  const body = typeof payload === "string" ? { text: payload } : { value: payload };
+  // `source` labels the counts-only audit entry the gateway records (no text).
+  const toolName = typeof ctx.tool_name === "string" ? `:${ctx.tool_name}` : "";
+  const source = `cursor:${event}${toolName}`;
+  const body = typeof payload === "string" ? { text: payload, source } : { value: payload, source };
   const { status, json } = await postJson("/redact", body);
   if (status !== 200 || !json) throw new Error(`status ${status}`);
   return { redacted: json.redacted, piiDetected: !!json.piiDetected, matched: json.matched || {} };

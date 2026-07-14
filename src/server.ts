@@ -1,6 +1,8 @@
 // ===== SERVER (request dispatch + bootstrap) =================================
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { LogEntry } from "./contracts.ts";
 import type { GatewayConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import { sendJson, readBody, BodyTooLargeError } from "./http-utils.ts";
@@ -224,20 +226,45 @@ async function handleRequest(
   // only for the duration of the call). Accepts { text } (string) or { value }
   // (arbitrary JSON — every string leaf scrubbed via redactJson).
   if (method === "POST" && path === "/redact") {
-    let body: { text?: unknown; value?: unknown } = {};
+    let body: { text?: unknown; value?: unknown; source?: unknown } = {};
     try {
       const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
       if (j && typeof j === "object") body = j;
     } catch {
       /* empty/invalid -> treated as no content */
     }
+    // Counts-only audit: record that a scrub happened, with matched rule COUNTS
+    // and NO text (snapshot stays empty) — preserves the never-persist-raw-PII
+    // invariant while making Cursor tool-data scrubs visible in the traffic log.
+    const source = typeof body.source === "string" ? body.source : "cursor:tool-scrub";
+    const audit = (matched: Record<string, number>, reqLen: number, respLen: number): void => {
+      if (Object.keys(matched).length === 0) return; // only log scrubs that found PII
+      const entry: LogEntry = {
+        id: randomUUID(),
+        timestamp: new Date().toISOString(),
+        provider: "openai", // Cursor's API family; this is a hook-side scrub event
+        method: "HOOK",
+        path: source,
+        status: 200,
+        streaming: false,
+        durationMs: 0,
+        charCount: { request: reqLen, response: respLen, total: reqLen + respLen },
+        payloadSnapshot: { request: "", response: "" }, // never store raw tool data
+        piiDetected: true,
+        matchedRules: { inbound: matched, outbound: {} },
+      };
+      trafficLog.push(entry);
+    };
     if (typeof body.text === "string") {
       const { text, matched } = redactText(body.text, "inbound");
+      audit(matched, body.text.length, text.length);
       sendJson(res, 200, { redacted: text, matched, piiDetected: Object.keys(matched).length > 0 });
       return;
     }
     if (body.value !== undefined) {
       const { value, matched } = redactJson(body.value, "inbound");
+      const outLen = JSON.stringify(value ?? "").length;
+      audit(matched, JSON.stringify(body.value ?? "").length, outLen);
       sendJson(res, 200, { redacted: value, matched, piiDetected: Object.keys(matched).length > 0 });
       return;
     }

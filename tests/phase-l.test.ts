@@ -142,3 +142,31 @@ test("edge: preToolUse scrubs nested structured input; no-PII input left untouch
   assert.equal(cj.updated_input, undefined, "no rewrite when there's no PII");
   assert.equal(clean.status, 0);
 });
+
+// --- AUDIT: a scrub records a COUNTS-ONLY log entry (no raw text) --------------
+test("audit: tool-data scrub logs a counts-only entry with an empty snapshot", async () => {
+  const base = `http://127.0.0.1:${port}`;
+  await runHook(
+    JSON.stringify({
+      hook_event_name: "postToolUse",
+      tool_name: "MCP:read_customer",
+      tool_output: `email ${EMAIL}`,
+    }),
+  );
+  const logs = (await (await fetch(`${base}/logs`)).json()) as {
+    entries: {
+      method: string; path: string; piiDetected: boolean;
+      payloadSnapshot: { request: string; response: string };
+      matchedRules: { inbound: Record<string, number> };
+    }[];
+  };
+  const hookEntry = logs.entries.find((e) => e.method === "HOOK");
+  assert.ok(hookEntry, "a HOOK audit entry must be recorded");
+  assert.match(hookEntry.path, /^cursor:postToolUse/, "source labels the event + tool");
+  assert.equal(hookEntry.piiDetected, true);
+  assert.ok(hookEntry.matchedRules.inbound.EMAIL >= 1, "EMAIL count recorded");
+  // The invariant: NO raw text stored anywhere in the entry.
+  assert.equal(hookEntry.payloadSnapshot.request, "", "no request text persisted");
+  assert.equal(hookEntry.payloadSnapshot.response, "", "no response text persisted");
+  assert.ok(!JSON.stringify(hookEntry).includes("example.org"), "no raw PII in the log entry");
+});
