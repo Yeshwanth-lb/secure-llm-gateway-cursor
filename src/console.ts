@@ -357,7 +357,10 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     var rows = document.getElementById("t-rows");
     rows.innerHTML = view.map(function (e) {
       var t = new Date(e.timestamp).toLocaleTimeString();
-      var prov = esc(e.provider) + (e.model ? "<br><span style='color:#6c7086'>" + esc(e.model) + "</span>" : "") +
+      // HOOK rows are local Cursor tool-scrub events (never sent to a provider);
+      // label them "cursor" instead of the stored placeholder provider enum.
+      var provLabel = e.method === "HOOK" ? "cursor" : e.provider;
+      var prov = esc(provLabel) + (e.model ? "<br><span style='color:#6c7086'>" + esc(e.model) + "</span>" : "") +
         (e.blocked ? " <span class='pill pii-yes'>blocked</span>" : "");
       var main = '<tr class="row" data-id="' + esc(e.id) + '">' +
         "<td>" + esc(t) + "</td><td class='prov'>" + prov + "</td><td>" + esc(e.method) + "</td>" +
