@@ -79,7 +79,11 @@ test("happy: claude alias translates to Anthropic; gpt model passes through — 
 
   const body = (await res.json()) as any;
   assert.equal(body.object, "chat.completion");
-  assert.equal(body.model, "claude-sonnet-5");
+  // Response echoes the CLIENT's requested id (the alias), not the resolved
+  // Claude id — OpenAI-compatible clients (Cursor) validate a custom model by
+  // matching the returned `model` against what they sent. Real routing to
+  // claude-sonnet-5 is already asserted on the forwarded body above (line ~72).
+  assert.equal(body.model, "claude-via-gateway");
   const content = body.choices[0].message.content as string;
   assert.equal(content.includes(MOCK), false);
   assert.match(content, /\[REDACTED_MOCK_PII\]/);
@@ -186,4 +190,37 @@ test("edge: streaming Anthropic SSE with split PII is redacted + reframed to Ope
   assert.equal(e.provider, "anthropic");
   assert.equal(e.streaming, true);
   assert.ok((e.matchedRules.outbound.EMAIL ?? 0) >= 1);
+});
+
+// --- REGRESSION: model-list validation endpoint (Cursor model verify) ----------
+// Cursor validates a custom model by GETting /v1/models on its base URL. Proxying
+// that to the real OpenAI upstream 401s on the dummy key and Cursor reports the
+// model "not valid", blocking the chat. The gateway must answer locally with a
+// synthetic list containing the translate alias(es). (Fix 2026-07-13.)
+test("regression: GET /openai/v1/models is answered locally with translate aliases", async () => {
+  const res = await fetch(`${base}/openai/v1/models`, {
+    headers: { authorization: "Bearer sk-dummy" },
+  });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { object: string; data: { id: string }[] };
+  assert.equal(body.object, "list");
+  const ids = body.data.map((m) => m.id);
+  assert.ok(ids.includes("claude-via-gateway"), "must list the default translate alias");
+  // Never proxied to the fake upstream (it would have recorded a log entry).
+  assert.equal(trafficLog.recent(100, false).length, 0, "must not proxy the models probe");
+});
+
+// Cursor's base URL override may omit the `/openai` segment (set to the bare
+// gateway root). Root chat already routes to the shim, so the models probe must
+// also answer at the bare root — otherwise validation 404s while chat works,
+// and Cursor reports the model "not valid" on send. (Fix 2026-07-13.)
+test("regression: GET /v1/models and /models (no /openai prefix) answered locally", async () => {
+  for (const p of ["/v1/models", "/models"]) {
+    const res = await fetch(`${base}${p}`, { headers: { authorization: "Bearer sk-dummy" } });
+    assert.equal(res.status, 200, `${p} must be 200`);
+    const body = (await res.json()) as { object: string; data: { id: string }[] };
+    assert.equal(body.object, "list");
+    assert.ok(body.data.map((m) => m.id).includes("claude-via-gateway"), `${p} must list the alias`);
+  }
+  assert.equal(trafficLog.recent(100, false).length, 0, "must not proxy the root models probe");
 });

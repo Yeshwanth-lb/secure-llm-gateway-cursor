@@ -193,6 +193,12 @@ export async function proxyRequest(
 
   let bodyText = bodyBuf.toString("utf8");
   let model: string | undefined = rawModel;
+  // The exact model id the client asked for (e.g. the Cursor alias
+  // "claude-via-gateway"). OpenAI-compatible clients validate a custom model by
+  // matching the `model` field they get back against what they sent, so the
+  // translate-path OpenAI response must echo THIS id — not the resolved Claude
+  // id. `model` still holds the resolved id for policy checks, forwarding, logs.
+  const clientModel = rawModel;
 
   // Log-entry builder (takes the inbound scrub result explicitly so it can be
   // called from the translate preamble, before the main inbound scrub runs).
@@ -332,7 +338,7 @@ export async function proxyRequest(
     // path, reframe the *already-redacted* Anthropic SSE into OpenAI chunks.
     const sr = new StreamRedactor(logProvider, config.streamHoldbackChars);
     const reframer = translating
-      ? new AnthropicToOpenAISSE(model ?? "claude", nowSeconds, chunkId)
+      ? new AnthropicToOpenAISSE(clientModel ?? model ?? "claude", nowSeconds, chunkId)
       : null;
     const pipe = (redacted: Buffer): Buffer => (reframer ? reframer.push(redacted) : redacted);
     const headers = respHeaders(upstream.headers);
@@ -399,7 +405,7 @@ export async function proxyRequest(
       if (anthObj && anthObj.type === "message") {
         const red = redactJson(anthObj, "outbound");
         outMatched = red.matched;
-        const openai = anthropicToOpenAIResponse(red.value, model ?? "claude", nowSeconds);
+        const openai = anthropicToOpenAIResponse(red.value, clientModel ?? model ?? "claude", nowSeconds);
         if (!(openai as any).id) (openai as any).id = chunkId;
         outText = JSON.stringify(openai);
       } else {

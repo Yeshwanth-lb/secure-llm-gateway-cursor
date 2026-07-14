@@ -40,6 +40,7 @@ export interface GatewayConfig {
 // MODEL NAME: a "claude-*" id or one of these aliases -> translate to Anthropic;
 // anything else -> pass through to OpenAI. `cursorModelMap` then resolves the
 // alias to a real Claude model.
+// Override with CURSOR_TRANSLATE_MODELS to add aliases.
 const DEFAULT_CURSOR_TRANSLATE_MODELS = ["claude-via-gateway"];
 
 /** Alias -> real Claude model; overridable via CURSOR_MODEL_MAP (JSON). */

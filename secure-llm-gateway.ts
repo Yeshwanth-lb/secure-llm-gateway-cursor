@@ -14,6 +14,9 @@
 // =============================================================================
 
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { loadConfig } from "./src/config.ts";
 import { createGatewayServer } from "./src/server.ts";
 import { startStdioTransport } from "./src/mcp.ts";
@@ -73,7 +76,38 @@ export {
 } from "./src/model-policy.ts";
 
 // ---- bootstrap --------------------------------------------------------------
+// Load STATE_DIR/.env (default ~/.secure-llm-gateway/.env) into process.env
+// before config. This is where the server-side ANTHROPIC_API_KEY lives (used by
+// the Cursor translate auth-swap). Zero-dep KEY=VALUE parse; existing env wins,
+// so launchd/CLI overrides are never clobbered. Missing file is a no-op.
+function loadStateEnv(): void {
+  const dir = process.env.GATEWAY_STATE_DIR || path.join(os.homedir(), ".secure-llm-gateway");
+  const file = path.join(dir, ".env");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return; // no .env -> nothing to load
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s || s.startsWith("#")) continue;
+    const eq = s.indexOf("=");
+    if (eq === -1) continue;
+    const key = s.slice(0, eq).trim();
+    let val = s.slice(eq + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    if (key && process.env[key] === undefined) process.env[key] = val;
+  }
+}
+
 function main(): void {
+  loadStateEnv();
   const config = loadConfig();
   const stdio = process.argv.includes("--stdio") || process.env.MCP_STDIO === "1";
   if (stdio) startStdioTransport(); // stdout stays JSON-RPC only; logs go to stderr

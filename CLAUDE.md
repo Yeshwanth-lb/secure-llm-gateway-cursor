@@ -190,7 +190,7 @@ A phase is **done** only when **all** of these hold:
 
 **Last updated:** 2026-07-13
 **Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅
-**Overall:** Core gateway, console, model policy, clean view, global client integration, and full Cursor PII redaction complete. Suite 87/87 green.
+**Overall:** Core gateway, console, model policy, clean view, global client integration, and full Cursor PII redaction complete. Suite 89/89 green.
 
 **Operational bootstrap (verified 2026-07-10):** The single bootstrap command is
 `node scripts/gateway-service.mjs install` — it registers the per-user service, runs
@@ -271,6 +271,41 @@ decisions worth remembering:
   `spawnSync` — `spawnSync` blocks the parent event loop and deadlocks the
   in-process gateway serving `/detect`.
 - Full rationale + limitations: `CURSOR_INTEGRATION_PLAN.md`.
+
+**Cursor model-validation fix (2026-07-13):** Cursor validates a custom model by
+`GET`ting `/v1/models` on its "Override OpenAI Base URL". That GET has no body, so
+the shim can't route it, and it was proxied to real OpenAI → 401 on the dummy key →
+Cursor reported *"Model name is not valid: claude-via-gateway"* and blocked the chat
+before any translate request was sent. `src/server.ts` now answers
+`GET /openai/(v1/)?models` locally with a synthetic OpenAI model list built from
+`config.cursorTranslateModels` (loopback bind, no secrets). Regression test added to
+`tests/phase-j.test.ts`. Suite 88/88.
+
+**Cursor model-echo fix (2026-07-13, the actual "not valid" root cause):** After the
+`/models` fix, Cursor *still* reported *"Model name is not valid: claude-via-gateway"*
+on send. Real cause: the translate response echoed the RESOLVED Claude id
+(`claude-sonnet-5`) in the OpenAI `model` field, but OpenAI-compatible clients validate
+a custom model by matching the returned `model` against what they SENT. `src/proxy.ts`
+now echoes the client's requested id (`clientModel`, the alias) in both the non-stream
+`anthropicToOpenAIResponse` and the `AnthropicToOpenAISSE` reframer; the resolved id is
+still used for policy checks, forwarding, and log entries. Verified live: request
+`model:"claude-via-gateway"` → response `model:"claude-via-gateway"`, forwarded body
+`model:"claude-sonnet-5"`.
+- **Reverted a bad prior workaround:** `DEFAULT_CURSOR_TRANSLATE_MODELS` had been
+  changed to `["claude-via-gateway", "gpt-4o"]` on the wrong theory that Cursor rejects
+  invented names before calling the base URL. That hijacked genuine `gpt-4o` to Claude
+  and broke the Phase-J pass-through test. Restored to `["claude-via-gateway"]`. The
+  echo fix — not a gpt-4o alias — is the correct solution. Suite 88/88.
+
+**Cursor `/models` root-path fix (2026-07-13, "not valid" recurrence):** The
+`/models` handler only matched `^/openai/(v1/)?models$`. When Cursor's "Override
+OpenAI Base URL" is set to the bare gateway root (`http://127.0.0.1:8000`, no
+`/openai` segment), model validation GETs `/v1/models` at root → 404, while chat
+POSTs at root (`/v1/chat/completions`) route to the shim and work — asymmetric, so
+Cursor reports *"Model name is not valid: claude-via-gateway"* on send even though
+the translate path is healthy. `src/server.ts` regex broadened to
+`^/(?:openai/)?(?:v1/)?models$` so both root and `/openai`-prefixed probes answer
+locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
 
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |

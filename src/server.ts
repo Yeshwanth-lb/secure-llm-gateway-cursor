@@ -108,6 +108,9 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
 
+  // TEMP access log (debug Cursor validation) — path only, no bodies/secrets.
+  process.stderr.write(`[access] ${new Date().toISOString()} ${method} ${req.url}\n`);
+
   // CORS preflight short-circuit. Only a trusted loopback origin gets ACAO;
   // a foreign origin receives no CORS grant (§5) — never a wildcard.
   if (method === "OPTIONS") {
@@ -139,6 +142,28 @@ async function handleRequest(
       host: config.host,
       port: config.port,
     });
+    return;
+  }
+
+  // Cursor validates a custom model by GETting `/v1/models` on its "Override
+  // OpenAI Base URL". Match BOTH the `/openai/...` prefix and the bare root
+  // (`/v1/models`, `/models`) — Cursor's base URL may or may not include the
+  // `/openai` segment, and root chat already routes to the shim, so models must
+  // answer at root too or validation 404s while chat works. Otherwise it is
+  // proxied to real OpenAI that 401s on the dummy key, so
+  // Cursor reports the model "not valid" and blocks the chat before any
+  // translate request is ever sent. Answer it locally with a synthetic OpenAI
+  // model list containing the translate aliases so validation passes. Loopback
+  // bind, no secrets in the response.
+  if (method === "GET" && /^\/(?:openai\/)?(?:v1\/)?models$/.test(path)) {
+    const created = Math.floor(Date.now() / 1000);
+    const data = [...new Set(config.cursorTranslateModels)].map((id) => ({
+      id,
+      object: "model",
+      created,
+      owned_by: "gateway",
+    }));
+    sendJson(res, 200, { object: "list", data });
     return;
   }
 
