@@ -1,6 +1,6 @@
 # Phase L — Cursor tool-data redaction via `preToolUse` / `postToolUse`
 
-**Status:** ✅ Implemented 2026-07-14 (`POST /redact` + `scripts/cursor-tool-redact-hook.mjs` + `tests/phase-l.test.ts`, 3/3; wired in `configure-cursor`). Remaining: one live Cursor tool-call to confirm the exact `preToolUse`/`postToolUse` field names (run with `CURSOR_HOOK_CAPTURE=1`) — the hook accepts documented + alias keys defensively until then.
+**Status:** ✅ Implemented & live-verified 2026-07-14 (`POST /redact` + `scripts/cursor-tool-redact-hook.mjs` + `tests/phase-l.test.ts`, 3/3; wired in `configure-cursor`). Live capture against Cursor 3.9.16 confirmed the contract: `preToolUse` carries `tool_input` (object), `postToolUse` carries `tool_output` (JSON string); `hook_event_name` is `preToolUse`/`postToolUse`. Real-payload scrub (EMAIL+CC) verified end-to-end. Note: Cursor also sends `user_email` + `tool_name` + transcript path in every hook payload. Open limitation unchanged: `updated_mcp_tool_output` rewrite is expected to apply to MCP tool output; built-in tool (List/Read) output rewrite is not guaranteed.
 **Author:** Yeshwanth (with Claude Code)
 **Depends on:** Phase K (block hooks), Phase A1/A2 (redaction engine), gateway `/detect`
 **Design authority:** this file + CLAUDE.md §3 (TDD + phase gate). If in doubt, CLAUDE.md wins.
