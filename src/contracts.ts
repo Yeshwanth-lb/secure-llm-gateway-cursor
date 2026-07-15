@@ -48,4 +48,8 @@ export interface LogEntry {
     inbound: Record<string, number>;
     outbound: Record<string, number>;
   };
+  /** Distilled user prompt + assistant output, computed from the FULL redacted
+   *  body at capture time (so it survives snapshot truncation on huge requests).
+   *  Optional: absent on hook/audit entries and older log entries. */
+  clean?: { userPrompt: string; assistantOutput: string };
 }

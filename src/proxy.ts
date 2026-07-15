@@ -13,6 +13,7 @@ import { buildForwardHeaders } from "./routing.ts";
 import { redactJson, redactText } from "./redaction.ts";
 import { StreamRedactor } from "./stream-redactor.ts";
 import { trafficLog } from "./traffic-log.ts";
+import { extractUserPrompt, extractAssistantOutput } from "./clean-view.ts";
 import { sendJson } from "./http-utils.ts";
 import { extractModel, isModelBlocked } from "./model-policy.ts";
 import {
@@ -232,6 +233,13 @@ export async function proxyRequest(
       },
       piiDetected: hasKeys(inb.matched) || hasKeys(outMatched),
       matchedRules: { inbound: inb.matched, outbound: outMatched },
+      // Distill from the FULL redacted body now, while we still have it — the
+      // stored snapshot is truncated (SNAPSHOT_CHARS) and a huge Claude Code
+      // request would otherwise lose the user prompt sitting past the cut.
+      clean: {
+        userPrompt: extractUserPrompt(inb.text),
+        assistantOutput: extractAssistantOutput(logProvider, respText),
+      },
     };
     trafficLog.push(entry);
   };

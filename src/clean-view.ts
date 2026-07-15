@@ -102,7 +102,9 @@ export function cleanEntry(e: LogEntry): LogEntry & {
 } {
   return {
     ...e,
-    clean: {
+    // Prefer the capture-time distillation (from the full body); fall back to
+    // parsing the truncated snapshot for older/hook entries that lack it.
+    clean: e.clean ?? {
       userPrompt: extractUserPrompt(e.payloadSnapshot.request),
       assistantOutput: extractAssistantOutput(e.provider, e.payloadSnapshot.response),
     },
