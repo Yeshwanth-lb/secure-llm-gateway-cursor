@@ -29,3 +29,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated PII test fixture (regenerate via scripts/gen-pii-sample.mjs) — never commit PII-shaped data
+pii-sample.txt

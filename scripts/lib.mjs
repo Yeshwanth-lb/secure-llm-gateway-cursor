@@ -53,7 +53,7 @@ function bootstrapEnv() {
 bootstrapEnv();
 
 export const HOST = process.env.GATEWAY_HOST || "127.0.0.1";
-export const PORT = Number(process.env.GATEWAY_PORT || 8000);
+export const PORT = Number(process.env.GATEWAY_PORT || 8001);
 /** Loopback URL clients use for hooks + MCP. Always 127.0.0.1 — loopback-only. */
 export const BASE_URL = `http://${HOST}:${PORT}`;
 export const SERVICE_LABEL = "tech.skylo.secure-llm-gateway";

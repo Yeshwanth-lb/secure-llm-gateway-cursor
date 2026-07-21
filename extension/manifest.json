@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini PII Redaction (local gateway)",
+  "version": "0.1.0",
+  "description": "Best-effort, fail-closed PII redaction for gemini.google.com. Rewrites prompts through the local redaction gateway before they leave the browser. One-way: values are not restored.",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:8001/*", "http://127.0.0.1:8000/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://mail.google.com/*",
+        "https://docs.google.com/*",
+        "https://drive.google.com/*",
+        "https://chat.google.com/*"
+      ],
+      "js": ["src/content-bridge.js", "src/loader.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/content-main.js",
+        "src/interceptor-core.js",
+        "src/composer.js",
+        "src/tripwire.js"
+      ],
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://mail.google.com/*",
+        "https://docs.google.com/*",
+        "https://drive.google.com/*",
+        "https://chat.google.com/*"
+      ]
+    }
+  ]
+}

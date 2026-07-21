@@ -60,6 +60,21 @@ function originAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
   return config.adminToken !== "" && t === config.adminToken;
 }
 
+/**
+ * A browser extension service worker calling the local hook endpoints presents a
+ * `chrome-extension://` (or `moz-extension://`) Origin, which is NOT loopback.
+ * Such an origin is only reachable by an installed extension on this machine —
+ * a different, narrower trust class than a foreign website (http/https origin),
+ * which stays blocked. Allowed ONLY for the hook endpoints (/detect, /redact),
+ * which take text and return a redaction result + match counts — they expose no
+ * stored traffic, secrets, or control-plane state. (Gemini-web extension, 2026-07-20.)
+ */
+function isExtensionOrigin(origin: string | string[] | undefined): boolean {
+  if (origin === undefined) return false;
+  const o = Array.isArray(origin) ? origin[0] : origin;
+  return /^(?:chrome-extension|moz-extension):\/\//i.test(o);
+}
+
 /** POST /api/* mutations: when adminToken is set, require token or loopback browser Origin. */
 function mutationAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
   if (config.adminToken === "") return true;
@@ -170,10 +185,17 @@ async function handleRequest(
   }
 
   // Control plane is guarded (§5): loopback browser Origin (or admin token) only.
+  // Exception: the local hook endpoints (/detect, /redact) also accept an
+  // extension service-worker origin (chrome-extension://) — see isExtensionOrigin.
+  const hookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
   const controlPath =
-    path === "/logs" || path === "/rules" || path === "/detect" || path === "/redact" ||
+    path === "/logs" || path === "/rules" || hookPath ||
     isApiPath(path) || isMcpPath(path);
-  if (controlPath && !controlPlaneAllowed(req, config)) {
+  if (
+    controlPath &&
+    !controlPlaneAllowed(req, config) &&
+    !(hookPath && isExtensionOrigin(req.headers["origin"]))
+  ) {
     sendJson(res, 403, { error: "Origin not allowed" });
     return;
   }
@@ -226,7 +248,7 @@ async function handleRequest(
   // only for the duration of the call). Accepts { text } (string) or { value }
   // (arbitrary JSON — every string leaf scrubbed via redactJson).
   if (method === "POST" && path === "/redact") {
-    let body: { text?: unknown; value?: unknown; source?: unknown } = {};
+    let body: { text?: unknown; value?: unknown; source?: unknown; audit?: unknown } = {};
     try {
       const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
       if (j && typeof j === "object") body = j;
@@ -236,8 +258,13 @@ async function handleRequest(
     // Counts-only audit: record that a scrub happened, with matched rule COUNTS
     // and NO text (snapshot stays empty) — preserves the never-persist-raw-PII
     // invariant while making Cursor tool-data scrubs visible in the traffic log.
+    // `audit:false` suppresses this entirely — used by the Gemini extension,
+    // which logs a single richer per-turn entry via /log-turn instead (so a
+    // send-time counts-only row doesn't duplicate the turn row).
     const source = typeof body.source === "string" ? body.source : "cursor:tool-scrub";
+    const doAudit = body.audit !== false;
     const audit = (matched: Record<string, number>, reqLen: number, respLen: number): void => {
+      if (!doAudit) return;
       if (Object.keys(matched).length === 0) return; // only log scrubs that found PII
       const entry: LogEntry = {
         id: randomUUID(),
@@ -270,6 +297,65 @@ async function handleRequest(
     }
     // Nothing to scrub -> echo empty, no PII.
     sendJson(res, 200, { redacted: "", matched: {}, piiDetected: false });
+    return;
+  }
+
+  // Per-turn chat logging for browser-extension clients (Gemini web, Phase G).
+  // The extension can't route chat through the proxy (the app calls the provider
+  // from Google's servers), so it POSTs the turn here AFTER the assistant replies:
+  // { prompt, response, model, source }. We REDACT both server-side (defense —
+  // the prompt is already redacted client-side; the response is redacted here so
+  // any model-generated PII never persists) and store ONE rich entry so the
+  // Traffic Inspector shows this turn exactly like a Claude turn: provider +
+  // model, and a clean { userPrompt, assistantOutput } view. Only redacted text
+  // is stored (never-log-raw-PII invariant). Loopback/extension-origin gated above.
+  if (method === "POST" && path === "/log-turn") {
+    let body: { prompt?: unknown; response?: unknown; model?: unknown; source?: unknown } = {};
+    try {
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      if (j && typeof j === "object") body = j;
+    } catch {
+      /* empty/invalid -> treated as no content */
+    }
+    const rawPrompt = typeof body.prompt === "string" ? body.prompt : "";
+    const rawResponse = typeof body.response === "string" ? body.response : "";
+    const model = typeof body.model === "string" && body.model ? body.model : "gemini";
+    const source = typeof body.source === "string" ? body.source : "gemini-web-extension";
+    // Redact both directions. The prompt is scrubbed inbound-style (real tokens);
+    // the response outbound-style — but we want readable tokens in the inspector,
+    // so scrub the response inbound-style too (it has no raw PII by construction,
+    // this is belt-and-suspenders for model-generated values).
+    const { text: redPrompt, matched: promptMatched } = redactText(rawPrompt, "inbound");
+    const { text: redResponse, matched: respMatched } = redactText(rawResponse, "inbound");
+    const piiDetected =
+      Object.keys(promptMatched).length > 0 || Object.keys(respMatched).length > 0;
+    const entry: LogEntry = {
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      provider: "gemini",
+      model,
+      method: "CHAT",
+      path: source,
+      status: 200,
+      streaming: false,
+      durationMs: 0,
+      charCount: {
+        request: redPrompt.length,
+        response: redResponse.length,
+        total: redPrompt.length + redResponse.length,
+      },
+      // Store REDACTED text only. These feed both the raw-snapshot view and the
+      // clean view below.
+      payloadSnapshot: { request: redPrompt, response: redResponse },
+      piiDetected,
+      matchedRules: { inbound: promptMatched, outbound: respMatched },
+      // Pre-distilled clean view: for Gemini the prompt/response are already the
+      // plain user/assistant text (no Claude JSON envelope), so cleanEntry uses
+      // these verbatim instead of trying to parse a Claude-shaped snapshot.
+      clean: { userPrompt: redPrompt, assistantOutput: redResponse },
+    };
+    trafficLog.push(entry);
+    sendJson(res, 200, { logged: true, piiDetected });
     return;
   }
 

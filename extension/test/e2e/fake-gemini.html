@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Fake Gemini (e2e harness)</title>
+<!--
+  A minimal stand-in for gemini.google.com used only by the Playwright e2e
+  (extension/test/e2e/run.mjs). It provides the DOM shapes content-main.js
+  depends on (a Quill-like contenteditable composer + a Send button) and a
+  page-side "send" handler that records what WOULD leave the browser. It also
+  simulates the isolated-bridge + background service worker by answering
+  `gemini-redact:redact-request` events via a real fetch to the local gateway.
+  This lets us exercise the REAL content-main.js logic in a REAL browser DOM
+  without packaging/loading a Chrome extension.
+-->
+<div class="ql-editor" contenteditable="true" role="textbox" aria-label="Enter a prompt here"></div>
+<button aria-label="Send">Send</button>
+
+<script>
+  // Capture a CLEAN fetch BEFORE content-main.js (a deferred module) installs the
+  // tripwire that wraps window.fetch. In the real extension the redact call runs
+  // in the background service worker, NOT page-world fetch, so the tripwire never
+  // sees it; here we must avoid that test artifact by using the pristine fetch.
+  const RAWFETCH = window.fetch.bind(window);
+
+  window.__sent__ = []; // each entry = composer text at the moment a send reached the page
+  window.__redactCalls__ = 0; // how many times we asked the "gateway"
+  window.__blocked__ = []; // fail-closed notifications
+
+  const params = new URLSearchParams(location.search);
+  const BASE = params.get("base"); // gateway base URL, injected by the harness
+
+  // Stand in for bridge -> background -> gateway.
+  window.addEventListener("gemini-redact:redact-request", async (e) => {
+    const { id, text } = (e && e.detail) || {};
+    let result = { ok: false };
+    try {
+      window.__redactCalls__++;
+      const r = await RAWFETCH(BASE + "/redact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        result = { ok: true, redacted: j.redacted, piiDetected: j.piiDetected };
+      }
+    } catch {
+      /* leave result ok:false -> fail closed */
+    }
+    window.dispatchEvent(new CustomEvent("gemini-redact:redact-response", { detail: { id, result } }));
+  });
+
+  window.addEventListener("gemini-redact:blocked", (e) => window.__blocked__.push((e.detail || {}).reason));
+
+  // The page's OWN send path — represents Gemini dispatching the prompt to
+  // Google. It must fire only for events content-main lets through (the
+  // synthetic, redacted re-submit), never for the original killed one.
+  function doSend() {
+    const box = document.querySelector(".ql-editor");
+    window.__sent__.push(box.textContent);
+  }
+  // Bubble-phase document listener: runs AFTER content-main's capture listener,
+  // so a stopImmediatePropagation() on the original event prevents it.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) doSend();
+  });
+  document.querySelector('button[aria-label="Send"]').addEventListener("click", () => doSend());
+</script>
+
+<script type="module" src="/src/content-main.js"></script>

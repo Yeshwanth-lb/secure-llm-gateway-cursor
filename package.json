@@ -17,10 +17,12 @@
     "dev": "node --experimental-strip-types secure-llm-gateway.ts",
     "stdio": "node dist/secure-llm-gateway.js --stdio",
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
+    "test:gemini-e2e": "node --experimental-strip-types extension/test/e2e/run.mts",
     "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
+    "playwright": "^1.61.1",
     "typescript": "^5.8.3"
   }
 }

@@ -101,7 +101,7 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
   const base: GatewayConfig = {
     // Loopback-only: the gateway never binds a routable address (§1, §5).
     host: process.env.GATEWAY_HOST ?? "127.0.0.1",
-    port: toInt(process.env.GATEWAY_PORT, 8000),
+    port: toInt(process.env.GATEWAY_PORT, 8001),
     bodyCapBytes: toInt(process.env.MAX_BODY_BYTES, 25 * 1024 * 1024),
     streamHoldbackChars: toInt(process.env.STREAM_HOLDBACK_CHARS, 96),
     // default 256 KB — captures a full Claude Code turn incl. the trailing

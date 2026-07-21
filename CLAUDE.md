@@ -188,9 +188,58 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-14
-**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅
-**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Suite 93/93 green.
+**Last updated:** 2026-07-21
+**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅ + Gemini-web browser extension (G) 🟢 (G1/G2/G3/G-CORS live-verified on gemini.google.com; G4 tripwire hardened + ON by default; **G-Workspace live-verified 2026-07-21 — Gmail/Docs/Sheets/Slides/Chat side panel redacted on the wire**; G5 enterprise pending)
+**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Gemini-web extension under `extension/` **works end-to-end live** — all 14 default PII types typed into gemini.google.com are redacted to tokens before leaving the browser (verified 2026-07-20 via `scripts/gen-pii-sample.mjs`), logged as one `gemini · CHAT` row with model + clean prompt/output view. G4 tripwire now Luhn-checked + endpoint-scoped and **ON by default** — a DOM-independent fail-closed net that blocks (not leaks) raw PII if a Gemini UI change breaks the DOM path. **Extended to Google Workspace (2026-07-21): the same extension now redacts the Gmail/Docs/Sheets/Slides/Chat "Ask Gemini" side panel — live-verified token-on-the-wire in Docs + Gmail** (additive change, gemini.google.com untouched). Suite 109/109 green + Gemini e2e 8/8. Known limit: `\b`-anchored rules miss PII glued to adjacent chars (see `gemini_imp.md` §7.11).
+
+**Gemini-web extension (Phase G, started 2026-07-20):** New workstream under
+`extension/` (sibling to `src/`, not coupled to the gateway module graph — it
+only calls `POST /redact` over loopback, same pattern as the Cursor hooks).
+Design + phase gates: `scripts/gemini_imp.md` (rev.2). Key decisions:
+- **Gemini web can't use the loopback-gateway approach** (like Claude Desktop /
+  Cursor chat) — the browser sends prompts from Google's servers, so there's no
+  on-machine request path to occupy. The only local interception point is a
+  **browser extension** working at the **DOM level** (MV3 forbids rewriting
+  request bodies).
+- **One-way redaction (rev.2).** No reversible map, no restore-for-display. The
+  user's own message and every reply permanently show fixed tokens
+  (`[REDACTED_PII_EMAIL]`). This deliberately deleted an entire complexity class
+  and means the **existing `/redact` endpoint is reused UNCHANGED** (no new
+  backend, no map field).
+- **The real risk is Stage 3 (kill + re-fire), not the DOM read.** You can't
+  pause a DOM event across an async gateway call, so the design fully kills the
+  original submit (`preventDefault` + `stopImmediatePropagation` on a
+  `document`-level capture listener) and independently re-fires a redacted
+  submit. Two failure modes are handled explicitly: (a) **loop guard** — our own
+  synthetic re-submit must not be re-intercepted (flag + event tag +
+  `isTrusted:false` check, in `extension/src/interceptor-core.js`); (b)
+  **framework model sync** — writing text must use the native setter + a real
+  `input` event or the framework may submit stale pre-redaction text.
+- **Testable core factored out.** Loop guard / fail-closed / tripwire-predicate
+  are pure and unit-tested headlessly (`tests/phase-gemini-core.test.ts`); the
+  selector/DOM code (`composer.js`) can only be validated against the live
+  Gemini page (Stages 2/3/5, manual — see `extension/README.md`).
+- **MV3 loading:** content scripts can't `import`, so an isolated-world
+  `loader.js` injects the MAIN-world ES module via `web_accessible_resources`
+  (no bundler, stays zero-build).
+- **CORS blocker found + fixed (2026-07-20).** The gateway grants CORS to
+  **loopback origins only** (`src/server.ts` `corsHeaders`, §5) and the `/redact`
+  **POST** response carries no `Access-Control-Allow-Origin` at all (only the
+  OPTIONS preflight does). So a fetch from the page (MAIN world, gemini.google.com
+  origin — or even a loopback page origin) is browser-blocked → the extension
+  would fail closed on every message. Fix: the gateway is left UNCHANGED; the
+  `/redact` fetch moved to a **background service worker** (`src/background.js`),
+  which has `host_permissions` for `127.0.0.1:8000` and is not subject to page
+  CORS. Path is now MAIN → `CustomEvent` → isolated bridge →
+  `chrome.runtime.sendMessage` → SW → fetch. The page never fetches the gateway.
+- **e2e harness (Playwright, dev-only dep).** `npm run test:gemini-e2e` drives
+  the REAL `content-main.js` in headless Chromium against a fake Gemini page
+  backed by the real gateway, proving the Stage-3 mechanics: capture-phase
+  intercept kills the original submit, redacted text is written+read
+  (model-sync), a synthetic re-submit fires and is NOT re-intercepted (loop
+  guard = exactly one gateway call + one send), zero raw PII leaves, and
+  gateway-down blocks the send. 8/8. Does NOT cover the real gemini.google.com
+  selectors or the SW/CORS plumbing end-to-end — those stay manual (Chrome).
 
 **Cursor architecture finding (2026-07-14):** Cursor CHAT cannot be routed through a
 loopback gateway — Cursor makes provider calls from its OWN cloud servers and bans
@@ -340,6 +389,21 @@ locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
 | J — Cursor OpenAI↔Anthropic shim | ✅ Done | claude-alias translates + gpt passes through (one endpoint) / missing-messages 400 + blocked-alias 403 / streaming split-PII reframed to OpenAI | ✅ 3/3 | `src/openai-anthropic-shim.ts`. Model-name routing on the shared `/openai` endpoint (Cursor has one global base-URL override). Model-policy ordering fixed (policy checks the RESOLVED Claude model). `tests/phase-j.test.ts`. |
 | K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed | ✅ 3/3 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (these prompt/file hooks can't rewrite). `tests/phase-k.test.ts`. |
 | L — Cursor tool-data scrub | ✅ Done | postToolUse rewrites MCP output (PII→tokens) / gateway-down → preToolUse deny + postToolUse withhold (no raw) / nested input scrubbed, clean input untouched | ✅ 3/3 | `scripts/cursor-tool-redact-hook.mjs` + `POST /redact` (loopback-gated, never logged). Rewrite hooks: `preToolUse.updated_input`, `postToolUse.updated_mcp_tool_output`. **Live-verified 2026-07-14** against Cursor 3.9.16 — field names confirmed `tool_input` (object) / `tool_output` (string); real-payload scrub of EMAIL+CC end-to-end. `tests/phase-l.test.ts`. |
+
+**Gemini-web extension (Phase G) — sub-ledger.** Separate deliverable under `extension/`; design + gates in `scripts/gemini_imp.md`. DOM stages are **browser-gated** (validated against the live Gemini page, not `npm test`) — see `extension/README.md`.
+
+| Stage | Status | E2e / unit tests (happy / failure / edge) | Suite green? | Notes |
+|---|---|---|---|---|
+| G1 — Gateway `/redact` contract | ✅ Done | single email→fixed token / malformed→200 empty (shipped behavior) / multi-PII replaced + clean untouched | ✅ 3/3 | Verification only — endpoint reused UNCHANGED (no map). `tests/phase-gemini.test.ts`. |
+| G-core — Interceptor control logic | ✅ Done | loop guard (synthetic/in-flight/untrusted not intercepted) / fail-closed decision / tripwire predicate | ✅ 7/7 | Pure, headless. `extension/src/interceptor-core.js` + `tripwire.js`; `tests/phase-gemini-core.test.ts`. |
+| G2 — Extension skeleton (loads/locates) | 🟡 Scaffolded | manual: activates on gemini.google.com, locates composer / inert on other domains / waits for late-rendered composer | n/a (browser) | `manifest.json`, `loader.js`, `content-bridge.js`, `composer.js`. Selectors need live tuning. |
+| G2 — Extension skeleton (loads/locates) | ✅ Live-verified 2026-07-20 | loads on gemini.google.com, `composer match: div.ql-editor[contenteditable="true"]` confirmed live / inert off-domain / SPA late-render handled | n/a (browser) | First composer selector matches the real Gemini DOM. |
+| G3 — Intercept + redact + re-submit | ✅ Live-verified 2026-07-20 | e2e 8/8 (headless) + **real gemini.google.com: real email typed → sent bubble shows `[REDACTED_PII_EMAIL]`, raw never sent** / gateway-down blocks send / send-button path | ✅ e2e 8/8 + live | `extension/test/e2e/run.mts`. Live proof resolved the two hardest risks: (a) synthetic re-submit DOES trigger Gemini's Angular send; (b) **Quill model-sync** — a bare `textContent` write leaked raw because Gemini reads Quill's Delta, which syncs from the DOM ASYNC; fixed with `execCommand("insertText")` in `composer.writeText` + a 120ms yield before re-fire so the Delta absorbs the change. |
+| G-CORS — Background SW fetch path | ✅ Fixed + live-verified 2026-07-20 | page-world `/redact` is CORS-blocked → moved to background SW; gateway 403'd the SW's `chrome-extension://` origin → gateway now allows extension origins on `/detect`+`/redact` only | ✅ 104/104 | `src/background.js` + bridge relay; `src/server.ts` `isExtensionOrigin`. Foreign http(s) origins still blocked; hook endpoints expose no stored data. Port: gateway runs **8001** (not 8000) — extension defaults + `host_permissions` updated. |
+| G6 — Per-turn logging (provider+model+clean view) | ✅ Live-verified 2026-07-20 | `/log-turn` unit-tested (gemini entry, redacted prompt+response, clean view, no raw PII) + **live: Inspector shows `gemini / gemini-flash · CHAT`, clean view = redacted user prompt + full assistant output** | ✅ 106/106 + live | New `POST /log-turn` logs ONE `CHAT` row per turn: `provider:gemini` + model + `clean{userPrompt,assistantOutput}`, rendered like a Claude turn. Send-time `/redact` passes `audit:false` (no duplicate row). Extension captures the reply via a settle-debounced MutationObserver (`readLatestResponse`) + `getModel()` — both selectors hit live on first try. Sends the RAW prompt to `/log-turn` (gateway redacts before store) so PII flag/counts are accurate; only redacted text persisted. |
+| G4 — Fail-closed tripwire | ✅ Done (ON by default) | happy: redacted body on Gemini endpoint not aborted / failure: raw PII on Gemini endpoint aborted (fetch+XHR) + blocked event / edge: non-Luhn digits + off-endpoint telemetry NOT aborted | ✅ 109/109 | `tripwire.js` rewritten: `luhnValid` (mirrors `src/redaction.ts`), `bodyLooksRaw` (Luhn-gated card), `shouldInspectUrl` + `DEFAULT_GEMINI_ENDPOINTS` (endpoint scoping — telemetry false-positive fixed), `extractUrl`, XHR `open`-wrap. ON by default (`config.tripwire:false` / `tripwireEndpoints` to override via storage). Endpoint list is live-tunable like the selectors — **confirm against the real Network tab**. `tests/phase-gemini-core.test.ts`. |
+| G5 — Health check + enterprise deploy | ⬜ Not started | broken selector → fail closed / force-install can't be removed / managed config applied | — | `selectorsHealthy()` + 15s poll stubbed in; Admin-console rollout not done. |
+| G-Workspace — Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) | ✅ Live-verified 2026-07-21 | live: Docs + Gmail + **Sheets** + Chat network-proven (raw→zero matches; token in streamGenerate/create_message) / Enter-key path works (not just the ↑ arrow) / tripwire `shouldInspectUrl` covers `streamGenerate` | ✅ 109/109 + live | **Additive, gemini.google.com untouched.** `manifest.json` +Workspace hosts (mail/docs/drive/chat) in both match arrays; `composer.js` +`div[contenteditable][aria-label*="Ask Gemini" i]` selector (appsElements, NOT Quill — top-level DOM, not shadow/iframe); `content-main.js` `fireSubmit` now picks the **enabled+visible** send button (Workspace renders a **disabled decoy** `aria="Submit"` beside the real one) and dispatches a **full pointer sequence** (Gm3 Material buttons ignore a bare synthetic click); `tripwire.js` `DEFAULT_GEMINI_ENDPOINTS` +`streamGenerate`/`appsgenaiservice` (Workspace endpoint is lowercase, on appsgenaiservice host). **Selector-order fix (Sheets):** the `aria*="Ask Gemini"` selector must precede the generic `role=textbox`/`textarea` catch-alls in `composer.js` — Sheets' empty stray `role=textbox` boxes were hijacking `findComposer` → `readText`="" → send went out unredacted; reorder fixed it (Quill still first, gemini web unaffected). `content-main.js` has `CONFIG.debug` tracing in `onSubmitEvent` (off) that pinpointed it. Shared panel → one fix covers all five apps. **Drive: in manifest but still untested.** |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)

@@ -16,6 +16,11 @@ import type { AddressInfo } from "node:net";
 import { createGatewayServer, trafficLog } from "../secure-llm-gateway.ts";
 import { startFakeUpstream } from "./helpers/fake-upstream.ts";
 import { freePort } from "./helpers/net.ts";
+import { PORT } from "../scripts/lib.mjs";
+
+// Derive the expected loopback MCP URL from the same port source the service
+// uses, so a default-port change can't silently break these assertions.
+const MCP_URL = `http://127.0.0.1:${PORT}/mcp`;
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVICE = path.join(REPO, "scripts", "gateway-service.mjs");
@@ -94,7 +99,7 @@ test("config: configure-clients writes Cursor MCP + fail-closed session hooks on
     const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
     const hooks = JSON.parse(fs.readFileSync(path.join(tmp, "hooks.json"), "utf8"));
     assert.equal(mcp.mcpServers["secure-gateway"].type, "http");
-    assert.equal(mcp.mcpServers["secure-gateway"].url, "http://127.0.0.1:8000/mcp");
+    assert.equal(mcp.mcpServers["secure-gateway"].url, MCP_URL);
     assert.ok(hooks.hooks.sessionStart?.[0]?.failClosed, "sessionStart is fail-closed");
     assert.ok(hooks.hooks.beforeMCPExecution?.[0]?.failClosed, "beforeMCP is fail-closed");
     // preToolUse/postToolUse are the Phase L tool-data SCRUB hooks (rewrite),
@@ -140,7 +145,7 @@ test("config: configure-cursor replaces a stale stdio secure-gateway entry (no l
     const mcp = JSON.parse(fs.readFileSync(path.join(tmp, "mcp.json"), "utf8"));
     const entry = mcp.mcpServers["secure-gateway"];
     assert.equal(entry.type, "http");
-    assert.equal(entry.url, "http://127.0.0.1:8000/mcp");
+    assert.equal(entry.url, MCP_URL);
     assert.equal(entry.command, undefined, "stale stdio command removed");
     assert.equal(entry.args, undefined, "stale stdio args removed");
     assert.equal(entry.envFile, undefined, "stale stdio envFile removed");
