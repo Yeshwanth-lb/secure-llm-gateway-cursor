@@ -357,11 +357,22 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     var rows = document.getElementById("t-rows");
     rows.innerHTML = view.map(function (e) {
       var t = new Date(e.timestamp).toLocaleTimeString();
-      // HOOK rows are local Cursor tool-scrub events (never sent to a provider);
-      // label them "cursor" instead of the stored placeholder provider enum.
-      var provLabel = e.method === "HOOK" ? "cursor" : e.provider;
+      // HOOK rows are local Cursor tool-scrub events, and cursor-* CHAT rows are
+      // turns replayed from Cursor's transcript — neither was sent to a provider
+      // by us, so label both "cursor" rather than the stored placeholder enum
+      // (Provider is a frozen contract, so the label lives here, not in the data).
+      var isCursor = e.method === "HOOK" || String(e.path || "").indexOf("cursor") === 0;
+      var provLabel = isCursor ? "cursor" : e.provider;
+      // "unchecked" = reached the model without passing the PII gate (a Cursor
+      // message queued while the agent was busy skips beforeSubmitPrompt, so it
+      // cannot be blocked). Red only alongside PII — that pair is a real leak.
+      var ungated = e.unchecked
+        ? " <span class='pill " + (e.piiDetected ? "pii-yes" : "pii-no") + "' title='" +
+          "This send never passed the PII gate — Cursor does not run the prompt hook on " +
+          "queued messages, so it could not be blocked.'>unchecked</span>"
+        : "";
       var prov = esc(provLabel) + (e.model ? "<br><span style='color:#6c7086'>" + esc(e.model) + "</span>" : "") +
-        (e.blocked ? " <span class='pill pii-yes'>blocked</span>" : "");
+        (e.blocked ? " <span class='pill pii-yes'>blocked</span>" : "") + ungated;
       var main = '<tr class="row" data-id="' + esc(e.id) + '">' +
         "<td>" + esc(t) + "</td><td class='prov'>" + prov + "</td><td>" + esc(e.method) + "</td>" +
         "<td>" + esc(e.path) + "</td>" +

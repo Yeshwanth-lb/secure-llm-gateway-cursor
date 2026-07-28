@@ -23,6 +23,7 @@ const CLAUDE_HOOK = path.join(REPO_ROOT, "scripts", "claude-session-hook.mjs");
 const CURSOR_HOOK = path.join(REPO_ROOT, "scripts", "cursor-gateway-hook.mjs");
 const CURSOR_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-redact-hook.mjs");
 const CURSOR_TOOL_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-tool-redact-hook.mjs");
+const CURSOR_TURN_LOG_HOOK = path.join(REPO_ROOT, "scripts", "cursor-turn-log-hook.mjs");
 const NODE = process.execPath;
 const NODE_ARGS = ["--experimental-strip-types", ENTRY];
 
@@ -252,6 +253,11 @@ function configureCursor() {
   // these scrub PII out of tool inputs / MCP tool outputs in transit (fail-closed:
   // deny / withhold). Unlike the block-only hooks above, they do not interrupt.
   const toolRedactHook = `${NODE} ${CURSOR_TOOL_REDACT_HOOK}`;
+  // Per-turn CHAT logging (Phase M): Cursor chat never reaches the gateway, so the
+  // inspector can only show it by replaying finished turns from Cursor's own
+  // transcript. Observational, fail-open, NOT failClosed — a logging hiccup must
+  // never block a session (it withholds a log line, it cannot leak).
+  const turnLogHook = `${NODE} ${CURSOR_TURN_LOG_HOOK}`;
   // No matcher: Cursor may label the server `user-secure-gateway`; the hook
   // script filters to our gateway and allows every other MCP through.
   writeJson(hooksFile, {
@@ -264,13 +270,15 @@ function configureCursor() {
       beforeTabFileRead: [{ command: redactHook, failClosed: true }],
       preToolUse: [{ command: toolRedactHook, failClosed: true }],
       postToolUse: [{ command: toolRedactHook, failClosed: true }],
+      stop: [{ command: turnLogHook }],
     },
   });
 
   log(
     `configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution + ` +
       `block-if-PII on beforeSubmitPrompt/beforeReadFile/beforeTabFileRead + ` +
-      `tool-data scrub on preToolUse/postToolUse, fail-closed)`,
+      `tool-data scrub on preToolUse/postToolUse, fail-closed; ` +
+      `per-turn CHAT logging on stop, fail-open)`,
   );
 }
 

@@ -342,6 +342,139 @@ clear `user_message`; a clean prompt → `continue: true`.
   `cursor.com/docs/hooks` after Cursor upgrades.
 7. **Model fidelity (Option C)** — Cursor's UI shows a GPT name while Claude answers.
   Cosmetic, worth flagging to users.
+8. **`@`-mention attachments bypassed the gate (found + fixed 2026-07-27)** — see §7.1.
+9. **Queued messages bypass the prompt gate entirely, and this is UNFIXABLE from a hook
+  (found live 2026-07-27)** — a message typed while the agent is busy is delivered without
+   `beforeSubmitPrompt` ever being invoked. Not a deny we can win: there is no call at all.
+   Only auditable after the fact — see §7.3.
+
+---
+
+### 7.3 The queued-message bypass (found live 2026-07-27, NOT fixable — audited instead)
+
+**The hole.** Sending a prompt from the composer while the agent is idle works exactly as
+designed: the hook fires, PII is detected, the send is denied, and the message never enters
+the conversation (verified — the denied text appears nowhere in the transcript). But a
+message **queued while the agent is busy** is delivered to the model with **no hook
+invocation at all**. Not an allow, not a deny — the gate is never asked.
+
+Proof from `prompt-hook-shape.log`, which records every invocation with its decision:
+
+```
+11:42:37  beforeSubmitPrompt  clean  ALLOW    <- "run the full test suite"
+                                              <- queued: "my email is <addr>"  (NO ENTRY)
+                                              <- queued: "did it work"         (NO ENTRY)
+11:46:50  beforeSubmitPrompt  clean  ALLOW    <- next composer send
+```
+
+The invocation count did not move while two queued messages were delivered, one carrying a
+real address. Cursor's own UI showed them as "2 Queued" at that moment.
+
+**Why no hook can fix it.** There is no interception point on the drain path. No other
+Cursor hook carries prompt text: `sessionStart` and `beforeMCPExecution` don't see prompts,
+`preToolUse`/`postToolUse` cover tool payloads, and `stop` fires after the model already
+answered. A queued send is committed to the conversation before any code of ours runs.
+
+**A related, distinct failure.** Even when the hook DOES fire and denies, a message already
+committed to the conversation is delivered anyway alongside the next approved send. The
+prompt hook scans pending transcript messages to refuse *subsequent* sends in that state
+(§7.1's mechanism, extended), but that is damage limitation after the fact, not prevention.
+Note the transcript does **not** contain queued messages while they sit in the queue — it is
+written on delivery — so the pending scan is blind to the queue itself.
+
+**What we built instead: an audit trail (Phase N).** Prevention being impossible, the goal
+becomes making the bypass visible rather than silent:
+
+- `cursor-redact-hook.mjs` records a **SHA-256 hash** of every prompt it approves
+ (`cursor-approved-prompts.json`, ring-capped at 500). Hashes only — no prompt text on disk,
+ preserving the never-persist-raw-PII invariant.
+- `cursor-turn-log-hook.mjs` hashes each delivered user message and flags a turn containing
+ one with no matching hash: `unchecked: true` on the `/log-turn` call.
+- `LogEntry.unchecked` (optional, additive — same shape as `blocked`) renders as an
+ **`unchecked` pill** in the Inspector, red when the row also has PII. **`unchecked` +
+ `piiDetected` is a confirmed leak**, and the hook writes a loud stderr line for it.
+- **An empty ledger flags nothing.** On first install, cleared state, or hooks added
+ mid-session we cannot distinguish a bypass from missing history, and an audit that cries
+ wolf on every historical turn is worse than no audit.
+
+**Say this plainly in the meeting:** Cursor prompt coverage is *block-on-composer-send,
+audit-on-queue*. The queue path is a real, demonstrated leak that Cursor's hook API gives us
+no way to close. If that is unacceptable, the only real fix is upstream (Cursor must invoke
+`beforeSubmitPrompt` on the drain path) — worth filing.
+
+---
+
+### 7.2 Seeing Cursor chat in the Traffic Inspector (Phase M, 2026-07-27)
+
+Limitation #1 above says the hook layer only refuses content — that remains true for
+*enforcement*, but **visibility** is now solved. Cursor chat never reaches the gateway, so
+the inspector could only show counts-only `HOOK` rows: no user prompt, no assistant output.
+
+The fix mirrors the Gemini extension's `/log-turn` design, using a source we already had:
+**Cursor writes the whole conversation to disk itself**, and passes the path to every hook
+as `transcript_path`. Format (verified live, Cursor 2.1.207):
+
+```
+{"role":"user","message":{"content":[{"type":"text","text":...}]}}
+{"role":"assistant","message":{"content":[{"type":"text"|"tool_use",...}]}}
+{"type":"turn_ended","status":"success"}
+```
+
+`scripts/cursor-turn-log-hook.mjs` runs on `stop`, reads turns added since its last run,
+and POSTs them to `/log-turn`, which redacts server-side and stores redacted text only.
+
+Design points worth keeping:
+
+- **Fail-OPEN, not fail-closed** (the one hook here that is). It gates nothing; dropping a
+ log line leaks nothing, whereas a logging bug that blocks a session would be intolerable.
+ A failed POST leaves the counter untouched so the turn is retried on the next fire.
+- **Dedupe is counts-only** (`cursor-turnlog-state.json`: transcript path → turns logged).
+ No transcript text is ever written to disk by the hook.
+- **`Provider` is a frozen contract**, so Cursor turns store as `openai` (its API family,
+ the same choice the tool-scrub audit makes) and the console labels `cursor-*` rows
+ "cursor" for display.
+- **The envelope is stripped.** Cursor wraps the typed message in `<user_query>`,
+ `<timestamp>`, attachment and open-file blocks; the row shows what the user typed, the
+ same way the Claude clean view strips Claude Code's boilerplate.
+- **Tool-only turns are skipped** (already covered by the preToolUse/postToolUse scrub),
+ and an unfinished turn is not logged until its `turn_ended` marker appears.
+
+Live-verified: 7 real turns rendered with prompt + assistant output.
+
+---
+
+### 7.1 The `@`-mention attachment bypass (found live 2026-07-27, fixed)
+
+Attaching a file with `@name (1-6)` inlined its contents into the request while
+**both** hooks stayed silent, so raw PII reached the model. Confirmed live: a file the
+`beforeReadFile` hook had just blocked was delivered in full one message later via `@`.
+
+Why neither hook fired, from a live payload capture (`prompt-hook-shape.log`):
+
+- **`beforeReadFile` never fires.** Cursor inlines the attachment itself; no agent file
+ read happens, so there is nothing to gate.
+- **`beforeSubmitPrompt` gets no content.** Its payload holds only `prompt` (the literal
+ mention text, e.g. 26 chars for `@pii-block-test.txt (1-6)`). The `attachments` array
+ carries **only `type:"rule"` path refs** (`CLAUDE.md`, `AGENTS.md`) — it never contains
+ the mentioned file, and no field carries file content.
+
+**Fix:** `scripts/cursor-redact-hook.mjs` now resolves `@`-tokens out of `ctx.prompt`
+against `ctx.workspace_roots`, reads those files from disk, and scans each through
+`/detect` — the content `beforeReadFile` would have seen. Unresolvable tokens (`@Web`,
+`@Symbol`, missing files) are skipped; resolution stays inside a workspace root.
+Regression tests in `tests/phase-k.test.ts`.
+
+**The false-positive trap (do not "fix" this by scanning the whole payload).** Cursor
+stamps its own **`user_email`** on every prompt — plus a `transcript_path` containing it.
+Per-field capture showed every field clean except `user_email: PII {"EMAIL":1}`. A
+whole-stdin scan would therefore deny **every message the user ever sends**. Only the
+prompt text and files it resolves to may be scanned; a test guards this.
+
+**Residual gap:** a mention scans the *whole* referenced file (stricter than the
+attached line range — safe direction). If a way exists to attach content with **no**
+`@`-token in the prompt, the payload carries no handle at all and that variant stays
+uncovered. Re-run the capture (`touch ~/.secure-llm-gateway/hook-capture`) after a
+Cursor upgrade to re-check the payload shape.
 
 ---
 

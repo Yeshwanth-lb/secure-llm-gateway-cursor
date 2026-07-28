@@ -91,6 +91,132 @@ test("failure: unparseable hook input fails closed", async () => {
   assert.ok(j.permission === "deny" || j.continue === false);
 });
 
+// --- REGRESSION: @-mention bypass (found 2026-07-27) --------------------------
+// Attaching a file/selection with `@name (1-6)` inlines its content into the
+// request WITHOUT a beforeReadFile event, and beforeSubmitPrompt receives only
+// the mention TEXT — `attachments` carries just `type:"rule"` path refs, never
+// the mentioned file. Live capture proved raw PII reached the model this way.
+// The prompt hook must therefore resolve @-mentions itself and scan those files.
+test("regression: beforeSubmitPrompt blocks PII in an @-mentioned file (attachment bypass)", async () => {
+  const dirty = path.join(tmpDir, "mentioned-secrets.txt");
+  fs.writeFileSync(dirty, `customer email: ${EMAIL}\n`);
+
+  // Line-range form — exactly what leaked live.
+  const ranged = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: "@mentioned-secrets.txt (1-6) what about now",
+      workspace_roots: [tmpDir],
+      user_email: EMAIL, // Cursor stamps this on EVERY prompt
+      attachments: [{ type: "rule", file_path: "CLAUDE.md" }],
+    }),
+  );
+  const rJson = JSON.parse(ranged.stdout);
+  assert.equal(rJson.continue, false, "@-mentioned file with PII must be blocked");
+  assert.match(rJson.user_message, /mentioned-secrets\.txt/);
+
+  // Bare mention + absolute-path mention must be caught too.
+  const bare = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: "@mentioned-secrets.txt summarize this",
+      workspace_roots: [tmpDir],
+      user_email: EMAIL,
+    }),
+  );
+  assert.equal(JSON.parse(bare.stdout).continue, false);
+
+  const abs = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: `look at @${dirty} please`,
+      workspace_roots: [tmpDir],
+      user_email: EMAIL,
+    }),
+  );
+  assert.equal(JSON.parse(abs.stdout).continue, false);
+});
+
+// --- REGRESSION: pending-message bypass (found live 2026-07-27) --------------
+// A DENY stops that send but does NOT remove the message from the chat — Cursor
+// delivers it with the NEXT approved prompt, which the hook never re-checks
+// (`prompt` holds only the newly typed text). Proved live from the capture log:
+// prompt(27) -> DENY, then prompt(22) -> ALLOW, and BOTH reached the model.
+// Pending messages are visible in the transcript after the last `turn_ended`.
+test("regression: a clean prompt is blocked while a denied message is still pending", async () => {
+  const transcript = path.join(tmpDir, "pending.jsonl");
+  const userEntry = (q: string) =>
+    JSON.stringify({
+      role: "user",
+      // Cursor wraps the typed text in its context envelope.
+      message: { content: [{ type: "text", text: `<timestamp>t</timestamp>\n<user_query>\n${q}\n</user_query>` }] },
+    });
+
+  // A completed turn, then a blocked-but-retained message sitting after it.
+  fs.writeFileSync(
+    transcript,
+    [
+      userEntry("earlier question"),
+      JSON.stringify({ role: "assistant", message: { content: [{ type: "text", text: "answer" }] } }),
+      JSON.stringify({ type: "turn_ended", status: "success" }),
+      userEntry(`my address is ${EMAIL}`), // denied earlier, still in the chat
+    ].join("\n") + "\n",
+  );
+
+  const blocked = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: "did it work",
+      transcript_path: transcript,
+      workspace_roots: [tmpDir],
+      user_email: EMAIL,
+    }),
+  );
+  const bJson = JSON.parse(blocked.stdout);
+  assert.equal(bJson.continue, false, "must not send while PII is pending in the chat");
+  assert.match(bJson.user_message, /pending/i);
+  assert.match(bJson.user_message, /Delete that message/i, "tells the user how to clear it");
+
+  // Once the pending turn completes (or the message is gone), sending resumes.
+  fs.appendFileSync(transcript, JSON.stringify({ type: "turn_ended", status: "success" }) + "\n");
+  const allowed = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: "did it work",
+      transcript_path: transcript,
+      workspace_roots: [tmpDir],
+      user_email: EMAIL,
+    }),
+  );
+  assert.equal(JSON.parse(allowed.stdout).continue, true);
+  assert.equal(allowed.status, 0);
+});
+
+// The false-positive trap: Cursor sends its own `user_email` on every prompt, so
+// a whole-payload scan would deny EVERY message. Only prompt text + resolved
+// @-mention files may be scanned. Unresolvable tokens (@Web, @Symbol) are skipped.
+test("regression: prompt hook ignores Cursor's own user_email and unresolvable @tokens", async () => {
+  const clean = path.join(tmpDir, "clean-mention.txt");
+  fs.writeFileSync(clean, "export const sub = (a, b) => a - b;\n");
+
+  const r = await runHook(
+    JSON.stringify({
+      hook_event_name: "beforeSubmitPrompt",
+      prompt: "@clean-mention.txt @Web @SomeSymbol @missing-file.txt summarize this",
+      workspace_roots: [tmpDir],
+      user_email: EMAIL, // must NOT trigger a block
+      transcript_path: `/tmp/transcript-${EMAIL}.jsonl`, // nor must this
+      attachments: [
+        { type: "rule", file_path: "CLAUDE.md" },
+        { type: "rule", file_path: "AGENTS.md" },
+      ],
+    }),
+  );
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.continue, true, "Cursor's own user_email must never block a prompt");
+  assert.equal(r.status, 0);
+});
+
 // --- EDGE: beforeSubmitPrompt blocks a secret, allows a clean prompt ----------
 test("edge: beforeSubmitPrompt blocks a prompt with a secret, allows a clean one", async () => {
   const blocked = await runHook(

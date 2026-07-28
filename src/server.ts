@@ -2,7 +2,7 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { LogEntry } from "./contracts.ts";
+import type { LogEntry, Provider } from "./contracts.ts";
 import type { GatewayConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import { sendJson, readBody, BodyTooLargeError } from "./http-utils.ts";
@@ -310,7 +310,19 @@ async function handleRequest(
   // model, and a clean { userPrompt, assistantOutput } view. Only redacted text
   // is stored (never-log-raw-PII invariant). Loopback/extension-origin gated above.
   if (method === "POST" && path === "/log-turn") {
-    let body: { prompt?: unknown; response?: unknown; model?: unknown; source?: unknown } = {};
+    let body: {
+      prompt?: unknown;
+      response?: unknown;
+      model?: unknown;
+      source?: unknown;
+      provider?: unknown;
+      unchecked?: unknown;
+      // Attached-file / selection content that rode along in the request but never
+      // passed the block gate (Cursor auto-attaches open/selected files without a
+      // beforeSubmitPrompt event — see Phase O). Scanned for PII counts only; its
+      // text is deliberately NOT stored or shown, just as the tool-scrub audit does.
+      scanExtra?: unknown;
+    } = {};
     try {
       const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
       if (j && typeof j === "object") body = j;
@@ -319,7 +331,17 @@ async function handleRequest(
     }
     const rawPrompt = typeof body.prompt === "string" ? body.prompt : "";
     const rawResponse = typeof body.response === "string" ? body.response : "";
-    const model = typeof body.model === "string" && body.model ? body.model : "gemini";
+    // `provider` stays inside the FROZEN Provider enum. Cursor turns log as
+    // "openai" (Cursor's API family — same choice the tool-scrub audit makes);
+    // the console labels them "cursor" from `source`, so no contract changes.
+    const turnProvider: Provider =
+      body.provider === "anthropic" || body.provider === "openai" ? body.provider : "gemini";
+    const model =
+      typeof body.model === "string" && body.model
+        ? body.model
+        : turnProvider === "gemini"
+          ? "gemini"
+          : undefined;
     const source = typeof body.source === "string" ? body.source : "gemini-web-extension";
     // Redact both directions. The prompt is scrubbed inbound-style (real tokens);
     // the response outbound-style — but we want readable tokens in the inspector,
@@ -327,12 +349,24 @@ async function handleRequest(
     // this is belt-and-suspenders for model-generated values).
     const { text: redPrompt, matched: promptMatched } = redactText(rawPrompt, "inbound");
     const { text: redResponse, matched: respMatched } = redactText(rawResponse, "inbound");
+    // Attachment content: redact ONLY to count its PII — the redacted text is
+    // discarded, never stored or displayed (counts-only, like the Phase L audit).
+    const rawExtra = typeof body.scanExtra === "string" ? body.scanExtra : "";
+    const extraMatched = rawExtra ? redactText(rawExtra, "inbound").matched : {};
+    // Inbound counts = the displayed prompt PLUS any auto-attached content. The two
+    // are disjoint (the hook sends the attachment separately from the typed text),
+    // so summing per type gives the true PII total that reached the model.
+    const inboundMatched: Record<string, number> = { ...promptMatched };
+    for (const [rule, n] of Object.entries(extraMatched)) {
+      inboundMatched[rule] = (inboundMatched[rule] ?? 0) + n;
+    }
+    const attachmentLeaked = Object.keys(extraMatched).length > 0;
     const piiDetected =
-      Object.keys(promptMatched).length > 0 || Object.keys(respMatched).length > 0;
+      Object.keys(inboundMatched).length > 0 || Object.keys(respMatched).length > 0;
     const entry: LogEntry = {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
-      provider: "gemini",
+      provider: turnProvider,
       model,
       method: "CHAT",
       path: source,
@@ -348,12 +382,18 @@ async function handleRequest(
       // clean view below.
       payloadSnapshot: { request: redPrompt, response: redResponse },
       piiDetected,
-      matchedRules: { inbound: promptMatched, outbound: respMatched },
+      matchedRules: { inbound: inboundMatched, outbound: respMatched },
       // Pre-distilled clean view: for Gemini the prompt/response are already the
       // plain user/assistant text (no Claude JSON envelope), so cleanEntry uses
       // these verbatim instead of trying to parse a Claude-shaped snapshot.
       clean: { userPrompt: redPrompt, assistantOutput: redResponse },
     };
+    // A turn is `unchecked` when it carried PII the block gate never saw. Two such
+    // paths exist, both unblockable in-hook: a QUEUED send (caller flags it —
+    // Cursor skips beforeSubmitPrompt on the drain path), and an AUTO-ATTACHED
+    // file/selection (detected here — its content never reaches the prompt hook).
+    // Either way the flag makes the leak visible rather than silent; see contracts.ts.
+    if (body.unchecked === true || attachmentLeaked) entry.unchecked = true;
     trafficLog.push(entry);
     sendJson(res, 200, { logged: true, piiDetected });
     return;

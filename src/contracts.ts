@@ -36,6 +36,11 @@ export interface LogEntry {
   provider: Provider;
   model?: string; // model id from the request body/path, when detectable
   blocked?: boolean; // true when rejected by model-policy (not forwarded)
+  /** True when this content reached the model WITHOUT passing the PII gate. Cursor
+   *  does not invoke `beforeSubmitPrompt` for a message queued while the agent is
+   *  busy, so such a send cannot be blocked — only recorded. `unchecked` with
+   *  `piiDetected` is a real leak. */
+  unchecked?: boolean;
   method: string;
   path: string;
   status: number;

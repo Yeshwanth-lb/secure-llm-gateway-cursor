@@ -188,9 +188,11 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-21
-**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅ + Gemini-web browser extension (G) 🟢 (G1/G2/G3/G-CORS live-verified on gemini.google.com; G4 tripwire hardened + ON by default; **G-Workspace live-verified 2026-07-21 — Gmail/Docs/Sheets/Slides/Chat side panel redacted on the wire**; G5 enterprise pending)
-**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Gemini-web extension under `extension/` **works end-to-end live** — all 14 default PII types typed into gemini.google.com are redacted to tokens before leaving the browser (verified 2026-07-20 via `scripts/gen-pii-sample.mjs`), logged as one `gemini · CHAT` row with model + clean prompt/output view. G4 tripwire now Luhn-checked + endpoint-scoped and **ON by default** — a DOM-independent fail-closed net that blocks (not leaks) raw PII if a Gemini UI change breaks the DOM path. **Extended to Google Workspace (2026-07-21): the same extension now redacts the Gmail/Docs/Sheets/Slides/Chat "Ask Gemini" side panel — live-verified token-on-the-wire in Docs + Gmail** (additive change, gemini.google.com untouched). Suite 109/109 green + Gemini e2e 8/8. Known limit: `\b`-anchored rules miss PII glued to adjacent chars (see `gemini_imp.md` §7.11).
+**Last updated:** 2026-07-28
+**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅ + Cursor chat logging (M) ✅ + queue-bypass leak audit (N) ✅ (**queued sends bypass the prompt gate — unfixable in-hook, now audited**) + Cursor attached-file leak audit (O) ✅ (**auto-attached open/selected files bypass the gate like queued sends — unblockable, now audited**) + Gemini-web browser extension (G) 🟢 (G1/G2/G3/G-CORS live-verified on gemini.google.com; G4 tripwire hardened + ON by default; **G-Workspace live-verified 2026-07-21 — Gmail/Docs/Sheets/Slides/Chat side panel redacted on the wire**; **G-Heal self-healing composer finder ✅ 2026-07-22 (Layer 1) + G-Learn focus/fingerprint self-learning ✅ (Layer 1.5) + G5 live selector watcher script ✅ (Layer 2 detect-only)**; G5 enterprise rollout pending)
+**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Gemini-web extension under `extension/` **works end-to-end live** — all 14 default PII types typed into gemini.google.com are redacted to tokens before leaving the browser (verified 2026-07-20 via `scripts/gen-pii-sample.mjs`), logged as one `gemini · CHAT` row with model + clean prompt/output view. G4 tripwire now Luhn-checked + endpoint-scoped and **ON by default** — a DOM-independent fail-closed net that blocks (not leaks) raw PII if a Gemini UI change breaks the DOM path. **Extended to Google Workspace (2026-07-21): the same extension now redacts the Gmail/Docs/Sheets/Slides/Chat "Ask Gemini" side panel — live-verified token-on-the-wire in Docs + Gmail** (additive change, gemini.google.com untouched). Suite 121/121 green + Gemini e2e 15/15 (incl. Layer-1 self-heal against a reshuffled DOM + Layer-1.5 focus-wins against a competing bigger box). Known limit: `\b`-anchored rules miss PII glued to adjacent chars (see `gemini_imp.md` §7.11).
+
+**DOM-change resilience (2026-07-22, Layers 1 + 1.5 + 2):** `findComposer` (`extension/src/composer.js`) now tries a fast-path of **Gemini-SPECIFIC** selectors only (`div.ql-editor`, `rich-textarea .ql-editor`, Workspace `aria*="Ask Gemini"`) — the generic catch-alls (`role=textbox`, bare `textarea`) were **removed from the fast-path** because a blind generic match can return the wrong sane element (a search box / doc canvas) before stronger signals run (this leaked raw PII in the Layer-1.5 e2e until fixed). When the fast-path misses, all editable candidates go through `chooseComposer` (`extension/src/composer-learn.js`): **focus** (the box the user is typing in — decisive when several big boxes compete, "Case B") > **learned fingerprint** (persisted from a prior focused submit, so a later load recalls the composer after a redesign) > **heuristic shape** (`composer-finder.js`: size ≥ `MIN_COMPOSER_AREA`, prompt-like label, near an enabled send button). One path covers gemini.google.com + every Workspace app. The learned fingerprint is shape metadata only (tag/role/aria/stable class tokens — **never PII**), persisted via the isolated bridge to `chrome.storage.local` (`learnedComposer`) and restored into MAIN on load. Security is unchanged: an unfindable composer still fails **closed** (`content-main.js`) and the G4 tripwire still aborts raw PII on the wire — availability/UX win, not a security change. **Layer 2** is a detect-only canary (`scripts/selector-watch.mjs`, `npm run watch:selectors`): opens the real surfaces in a pre-logged-in Chrome profile (`--hold` keeps the browser open to sign in / open Workspace panels, then Enter to probe), reports whether the composer is findable, writes `~/.secure-llm-gateway/selector-watch-report.json`, exits non-zero on a hard break (gemini composer missing, or raw PII on the wire with `WATCH_SEND=1`). `--self-check` validates the probe headlessly. **Live-verified 2026-07-22: gemini composerFound=true on real gemini.google.com.** **Layer 3 (blind offline auto-patch of selectors) deliberately NOT built** — Layer 1.5 is the safe realization of "auto-identify after a Google change": it learns by the focus-at-submit signal (evidence, no leak) rather than guessing + persisting a selector.
 
 **Gemini-web extension (Phase G, started 2026-07-20):** New workstream under
 `extension/` (sibling to `src/`, not coupled to the gateway module graph — it
@@ -240,6 +242,121 @@ Design + phase gates: `scripts/gemini_imp.md` (rev.2). Key decisions:
   guard = exactly one gateway call + one send), zero raw PII leaves, and
   gateway-down blocks the send. 8/8. Does NOT cover the real gemini.google.com
   selectors or the SW/CORS plumbing end-to-end — those stay manual (Chrome).
+
+**Cursor per-turn CHAT logging — Phase M (2026-07-27):** The Traffic Inspector showed no
+prompt/output for Cursor (only counts-only `HOOK` rows) because Cursor chat never reaches
+the gateway. Fixed the same way Gemini was: replay each finished turn from the transcript
+**Cursor itself writes** — `transcript_path` is present in every hook payload (verified
+live; format `{"role":"user"|"assistant","message":{"content":[{"type":"text"|"tool_use"}]}}`
+plus `{"type":"turn_ended"}` markers). `scripts/cursor-turn-log-hook.mjs` (wired to `stop`,
+**fail-OPEN** — logging must never break a session) reads the new turns and POSTs raw text
+over loopback to `/log-turn`, which redacts and stores **redacted only**. Dedupe is a
+counts-only state file (`cursor-turnlog-state.json`) so a re-fire never double-logs; a
+failed post is retried on the next turn. Cursor's `<user_query>`/`<timestamp>` envelope is
+stripped so the row shows what the user actually typed. `/log-turn` gained a `provider`
+param — Cursor turns store as **`openai`** (its API family) because `Provider` is a FROZEN
+contract; the console labels `cursor-*` rows "cursor" for display. **Live-verified: 7 real
+turns rendered with prompt + assistant output.** Suite 121/121.
+- Also fixed: HOOK rows rendered *"(could not parse request — snapshot may be truncated;
+ raise SNAPSHOT_CHARS)"*, which was misleading — audit entries store an EMPTY snapshot by
+ design and raising `SNAPSHOT_CHARS` would change nothing. Now says so (`clean-view.ts`).
+- Also fixed: `tests/phase-l.test.ts` used `port + 1` as its "dead" port, which another
+ parallel test file's gateway can occupy — real flake, exposed by adding a test file.
+
+**Turn-log dedupe broke on transcript COMPACTION — FIXED (2026-07-28):** Dedupe stored a
+COUNT of turns logged per transcript, which assumes the file only grows. Cursor **compacts**
+a long session (summarizes and rewrites the transcript in place), leaving the counter AHEAD
+of the content — found live at **17 logged vs 6 present** — so `turns.length <= already` was
+true forever and that session **silently stopped logging**. Caught only because a live audit
+test showed an empty traffic log. Dedupe is now **per-turn content hashes**
+(`{ logged: [sha256(prompt\0response)] }`, capped 500/transcript, hashes only — no text on
+disk), which survive a rewrite. A failed POST no longer records its hash, so the retry path
+is unchanged.
+- **The first fix still wedged on the REAL state** (caught by live testing, not the suite):
+ migrating the legacy counter marked *every* remaining turn as logged and returned before
+ persisting, so each run re-read the counter and re-wedged. Migration now clamps to
+ `turns.length - 1` — the hook fires BECAUSE a turn just ended, so the newest turn must stay
+ loggable — and state is persisted on **every** path, converting counter → hashes once.
+- Regressions: `tests/phase-m.test.ts` "compacted transcript keeps logging" and "legacy
+ counter ahead of a compacted transcript still logs the newest turn". Suite 127/127.
+
+**Cursor QUEUED-MESSAGE bypass — FOUND LIVE, NOT FIXABLE, AUDITED (Phase N, 2026-07-27):**
+A message **queued while the agent is busy** is delivered to the model with **no
+`beforeSubmitPrompt` invocation at all** — not an allow, not a deny, the gate is never asked.
+Proved from `prompt-hook-shape.log`: the invocation count did **not move** across two queued
+sends, one carrying a real address, while Cursor's UI showed "2 Queued". A composer send
+while idle behaves correctly (hook fires, denies, and the message never enters the
+transcript). **No hook can close this** — no other Cursor hook carries prompt text
+(`sessionStart`/`beforeMCPExecution` don't see prompts, `preToolUse`/`postToolUse` are tool
+payloads, `stop` is after the answer), so a queued send is committed before our code runs.
+Also learned: the transcript does **not** contain queued messages while they're queued (it's
+written on delivery), so the §7.1 pending-message scan is blind to the queue — it only
+refuses *subsequent* sends once a denied message is already in history.
+- **Built instead: an audit trail.** `cursor-redact-hook.mjs` records a **SHA-256 hash** of
+ every prompt it approves (`cursor-approved-prompts.json`, ring-capped 500 — hashes only, no
+ prompt text on disk); `cursor-turn-log-hook.mjs` hashes each delivered message and sends
+ `unchecked: true` to `/log-turn` when one has no matching hash. New optional
+ `LogEntry.unchecked` (additive, same shape as `blocked`) renders as an `unchecked` pill,
+ red when the row also has PII. **`unchecked` + `piiDetected` = a confirmed leak**, plus a
+ loud stderr line. **An empty ledger flags nothing** (first install / cleared state can't be
+ distinguished from a bypass; crying wolf on every historical turn is worse than no audit).
+- Cursor prompt coverage is therefore **block-on-composer-send, audit-on-queue**. The real
+ fix is upstream — Cursor must invoke `beforeSubmitPrompt` on the drain path. Worth filing.
+- Full writeup: `CURSOR_INTEGRATION_PLAN.md` §7.3 (+ limitation #9). Suite 125/125.
+
+**Cursor AUTO-ATTACHED-FILE bypass — FOUND LIVE, NOT BLOCKABLE, AUDITED (Phase O, 2026-07-28):**
+A file the user has **OPEN or SELECTED** (no `@`-mention) is auto-inlined by Cursor into the
+request as an `<attached_files>` block — and that block is **not in the `beforeSubmitPrompt`
+payload**. Proved from `prompt-hook-shape.log` (12:32 test): the hook fired and **ALLOWED**
+with `ctx.prompt` = only the 32-char typed text and `attachments` = only `type:"rule"` refs
+(`CLAUDE.md`/`AGENTS.md`); the selected `pii-block-test.txt` (real email/SSN/card) was
+nowhere in `ctx`, yet the transcript's `<attached_files>` carried it and the model read it.
+So this is the **same wall as the queue bypass** — no prompt text, no file path, nothing to
+gate — and the `@`-mention fix (§7.1) can't catch it either (no `@token` to resolve). This is
+distinct from a queued send: the hook *does* fire, it just can't see the attachment.
+- **Worse, it was also INVISIBLE:** `cursor-turn-log-hook.mjs`'s `userMessage()` strips
+ `<attached_files>` for display, and the stripped text was also what got scanned — so the
+ console row read **"no PII"** on a real leak.
+- **Fix (visibility only — blocking stays impossible):** the turn-log hook now extracts
+ `<attached_files>` blocks (`attachmentsOf`, **that tag ONLY** — a whole-message scan would
+ hit Cursor's stamped `user_email` and flag every turn) and sends them as a new `scanExtra`
+ field to `/log-turn`. The gateway redacts `scanExtra` to **count** its PII, folds those
+ counts into `matchedRules.inbound` + `piiDetected`, and sets `entry.unchecked = true` when
+ the attachment carried PII — **without storing or displaying the file dump** (counts-only,
+ like the Phase L tool audit). Approval of the *typed* prompt does **not** clear the flag
+ (the live bug: the typed text was allowed, the attachment still leaked). The clean view
+ still shows only what the user typed.
+- Cursor prompt coverage is now **block-on-composer-send + `@`-mention; audit-on-queue +
+ auto-attach**. The `unchecked` pill + PII = confirmed leak covers both unblockable paths.
+ Real block-side fix is upstream (Cursor surfacing attachment content to `beforeSubmitPrompt`)
+ or a Cursor setting to disable auto-include of open/selected files. `tests/phase-o.test.ts`.
+ Suite 130/130.
+
+**IPv6 loopback false positive — FIXED (2026-07-27):** The `IPV6` rule had no `validate`,
+so the literal `::1` was treated as PII. This **blocked editing this project's own
+`src/server.ts`** (its loopback-origin check cites `::1` in a comment) — the block hook is
+not just theoretical friction. `isPublicIpv6` now exempts loopback/unspecified, mirroring
+the `isPublicIpv4` carve-out that already existed for `127.0.0.1`. Real IPv6 addresses
+still redact; wall-clock `12:34:56` still untouched.
+
+**Cursor `@`-mention bypass — FOUND LIVE + FIXED (2026-07-27):** Attaching a file with
+`@name (1-6)` inlined its contents into the request with **both** hooks silent, so raw PII
+reached the model. Found by live testing, not by the suite: a file `beforeReadFile` had
+just blocked was delivered in full one message later via `@`. Cause (proved by a payload
+capture): `beforeReadFile` never fires (Cursor inlines the attachment — no agent file read
+happens), and `beforeSubmitPrompt` receives only the mention TEXT — its `attachments` array
+holds **only `type:"rule"` path refs** (`CLAUDE.md`/`AGENTS.md`), never the mentioned file,
+and no field carries content. Fix: `cursor-redact-hook.mjs` resolves `@`-tokens from
+`ctx.prompt` against `ctx.workspace_roots`, reads those files, and scans each via `/detect`;
+unresolvable tokens (`@Web`, `@Symbol`, missing files) are skipped and resolution stays
+inside a workspace root. **Do NOT "fix" this by scanning the whole hook payload** — Cursor
+stamps its own `user_email` (and a `transcript_path` containing it) on EVERY prompt, so a
+whole-stdin scan denies every message the user sends; per-field capture showed all fields
+clean except `user_email`. A test guards that trap. The hook also gained an **opt-in schema
+capture** (`touch ~/.secure-llm-gateway/hook-capture` → `prompt-hook-shape.log`) that logs
+key paths/types/string LENGTHS + per-field counts-only PII verdicts — **never raw payload**,
+unlike the Phase L capture — for re-checking the payload shape after a Cursor upgrade.
+Suite 121/121. Full writeup: `CURSOR_INTEGRATION_PLAN.md` §7.1.
 
 **Cursor architecture finding (2026-07-14):** Cursor CHAT cannot be routed through a
 loopback gateway — Cursor makes provider calls from its OWN cloud servers and bans
@@ -387,7 +504,10 @@ locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
 | E — Control-plane console + `/api` | ✅ Done | MCP/browser negotiation + live rules/model controls | ✅ 9/9 | Admin-token gate when `GATEWAY_ADMIN_TOKEN` set. `tests/phase-e.test.ts`. |
 | I — Cross-platform integration | ✅ Done | shared-log aggregation / fail-closed health hook / global Cursor config / concurrent start | ✅ 6/6 | Loopback-only `http` MCP for Cursor + Claude; hook skips non-secure-gateway MCP. `tests/phase-i.test.ts`. |
 | J — Cursor OpenAI↔Anthropic shim | ✅ Done | claude-alias translates + gpt passes through (one endpoint) / missing-messages 400 + blocked-alias 403 / streaming split-PII reframed to OpenAI | ✅ 3/3 | `src/openai-anthropic-shim.ts`. Model-name routing on the shared `/openai` endpoint (Cursor has one global base-URL override). Model-policy ordering fixed (policy checks the RESOLVED Claude model). `tests/phase-j.test.ts`. |
-| K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed | ✅ 3/3 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (these prompt/file hooks can't rewrite). `tests/phase-k.test.ts`. |
+| K — Cursor block-if-PII hook | ✅ Done | file-read PII denied / clean allowed + malformed-stdin fail-closed / prompt secret blocked, clean allowed **+ 2 regressions (2026-07-27): `@`-mention file blocked (bypass) / Cursor's own `user_email` + unresolvable `@Web`-style tokens never block** | ✅ 5/5 | `scripts/cursor-redact-hook.mjs` + `POST /detect` (loopback-gated, never logged). Block-only (these prompt/file hooks can't rewrite). Now also resolves `@`-mentions from the prompt and scans those files — closes the live-found attachment bypass (§ note above, `CURSOR_INTEGRATION_PLAN.md` §7.1). `tests/phase-k.test.ts`. |
+| N — Queue-bypass leak audit | ✅ Done 2026-07-27 | approved prompt logs a CHAT row NOT flagged unchecked / a queued PII message the gate never saw is flagged `unchecked` + `piiDetected` (no raw PII stored) / absent approval history flags nothing, a partly-queued turn is flagged | ✅ 3/3 (125/125) | Cursor never invokes `beforeSubmitPrompt` for a message queued while the agent is busy — **unblockable, so audited**. Approval ledger = SHA-256 hashes only (`cursor-approved-prompts.json`); `LogEntry.unchecked` + Inspector pill. See `CURSOR_INTEGRATION_PLAN.md` §7.3. `tests/phase-n.test.ts`. |
+| O — Cursor attached-file leak audit | ✅ Done 2026-07-28 | attached-file PII flagged `unchecked` + `piiDetected` without dumping the file / a stamped `user_email` outside `<attached_files>` does NOT flag the turn (extraction is attached-files-only) / an APPROVED typed prompt still yields `unchecked` when an attachment leaks (+ multiple `<attached_files>` blocks all scanned) | ✅ 3/3 (130/130) | Auto-attached open/selected files ride the request as `<attached_files>` but never reach `beforeSubmitPrompt` — **unblockable like a queued send**, and previously invisible (stripped before logging). Turn-log hook sends them as `scanExtra`; `/log-turn` counts their PII into the row + marks `unchecked`, stores/shows nothing of the file. See § Phase O note above. `tests/phase-o.test.ts`. |
+| M — Cursor per-turn CHAT logging | ✅ Done 2026-07-27 (+ compaction fix 2026-07-28) | finished turn logged with redacted prompt + assistant output (envelope stripped) / missing transcript + dead gateway skip logging without breaking (then retry) / re-fire never double-logs, tool-only + unfinished turns skipped **+ 2 regressions: a compacted transcript keeps logging; a legacy counter ahead of it still logs the newest turn** | ✅ 5/5 (127/127) | `scripts/cursor-turn-log-hook.mjs` on `stop` (**fail-open** — observational, gates nothing) replays turns from Cursor's own `transcript_path` into `POST /log-turn` (+`provider` param; stores redacted only). Console labels `cursor-*` rows "cursor" — `Provider` enum untouched. **Live-verified: 7 real turns with prompt + output.** `tests/phase-m.test.ts`. |
 | L — Cursor tool-data scrub | ✅ Done | postToolUse rewrites MCP output (PII→tokens) / gateway-down → preToolUse deny + postToolUse withhold (no raw) / nested input scrubbed, clean input untouched | ✅ 3/3 | `scripts/cursor-tool-redact-hook.mjs` + `POST /redact` (loopback-gated, never logged). Rewrite hooks: `preToolUse.updated_input`, `postToolUse.updated_mcp_tool_output`. **Live-verified 2026-07-14** against Cursor 3.9.16 — field names confirmed `tool_input` (object) / `tool_output` (string); real-payload scrub of EMAIL+CC end-to-end. `tests/phase-l.test.ts`. |
 
 **Gemini-web extension (Phase G) — sub-ledger.** Separate deliverable under `extension/`; design + gates in `scripts/gemini_imp.md`. DOM stages are **browser-gated** (validated against the live Gemini page, not `npm test`) — see `extension/README.md`.
@@ -401,9 +521,11 @@ locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
 | G3 — Intercept + redact + re-submit | ✅ Live-verified 2026-07-20 | e2e 8/8 (headless) + **real gemini.google.com: real email typed → sent bubble shows `[REDACTED_PII_EMAIL]`, raw never sent** / gateway-down blocks send / send-button path | ✅ e2e 8/8 + live | `extension/test/e2e/run.mts`. Live proof resolved the two hardest risks: (a) synthetic re-submit DOES trigger Gemini's Angular send; (b) **Quill model-sync** — a bare `textContent` write leaked raw because Gemini reads Quill's Delta, which syncs from the DOM ASYNC; fixed with `execCommand("insertText")` in `composer.writeText` + a 120ms yield before re-fire so the Delta absorbs the change. |
 | G-CORS — Background SW fetch path | ✅ Fixed + live-verified 2026-07-20 | page-world `/redact` is CORS-blocked → moved to background SW; gateway 403'd the SW's `chrome-extension://` origin → gateway now allows extension origins on `/detect`+`/redact` only | ✅ 104/104 | `src/background.js` + bridge relay; `src/server.ts` `isExtensionOrigin`. Foreign http(s) origins still blocked; hook endpoints expose no stored data. Port: gateway runs **8001** (not 8000) — extension defaults + `host_permissions` updated. |
 | G6 — Per-turn logging (provider+model+clean view) | ✅ Live-verified 2026-07-20 | `/log-turn` unit-tested (gemini entry, redacted prompt+response, clean view, no raw PII) + **live: Inspector shows `gemini / gemini-flash · CHAT`, clean view = redacted user prompt + full assistant output** | ✅ 106/106 + live | New `POST /log-turn` logs ONE `CHAT` row per turn: `provider:gemini` + model + `clean{userPrompt,assistantOutput}`, rendered like a Claude turn. Send-time `/redact` passes `audit:false` (no duplicate row). Extension captures the reply via a settle-debounced MutationObserver (`readLatestResponse`) + `getModel()` — both selectors hit live on first try. Sends the RAW prompt to `/log-turn` (gateway redacts before store) so PII flag/counts are accurate; only redacted text persisted. |
-| G4 — Fail-closed tripwire | ✅ Done (ON by default) | happy: redacted body on Gemini endpoint not aborted / failure: raw PII on Gemini endpoint aborted (fetch+XHR) + blocked event / edge: non-Luhn digits + off-endpoint telemetry NOT aborted | ✅ 109/109 | `tripwire.js` rewritten: `luhnValid` (mirrors `src/redaction.ts`), `bodyLooksRaw` (Luhn-gated card), `shouldInspectUrl` + `DEFAULT_GEMINI_ENDPOINTS` (endpoint scoping — telemetry false-positive fixed), `extractUrl`, XHR `open`-wrap. ON by default (`config.tripwire:false` / `tripwireEndpoints` to override via storage). Endpoint list is live-tunable like the selectors — **confirm against the real Network tab**. `tests/phase-gemini-core.test.ts`. |
-| G5 — Health check + enterprise deploy | ⬜ Not started | broken selector → fail closed / force-install can't be removed / managed config applied | — | `selectorsHealthy()` + 15s poll stubbed in; Admin-console rollout not done. |
-| G-Workspace — Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) | ✅ Live-verified 2026-07-21 | live: Docs + Gmail + **Sheets** + Chat network-proven (raw→zero matches; token in streamGenerate/create_message) / Enter-key path works (not just the ↑ arrow) / tripwire `shouldInspectUrl` covers `streamGenerate` | ✅ 109/109 + live | **Additive, gemini.google.com untouched.** `manifest.json` +Workspace hosts (mail/docs/drive/chat) in both match arrays; `composer.js` +`div[contenteditable][aria-label*="Ask Gemini" i]` selector (appsElements, NOT Quill — top-level DOM, not shadow/iframe); `content-main.js` `fireSubmit` now picks the **enabled+visible** send button (Workspace renders a **disabled decoy** `aria="Submit"` beside the real one) and dispatches a **full pointer sequence** (Gm3 Material buttons ignore a bare synthetic click); `tripwire.js` `DEFAULT_GEMINI_ENDPOINTS` +`streamGenerate`/`appsgenaiservice` (Workspace endpoint is lowercase, on appsgenaiservice host). **Selector-order fix (Sheets):** the `aria*="Ask Gemini"` selector must precede the generic `role=textbox`/`textarea` catch-alls in `composer.js` — Sheets' empty stray `role=textbox` boxes were hijacking `findComposer` → `readText`="" → send went out unredacted; reorder fixed it (Quill still first, gemini web unaffected). `content-main.js` has `CONFIG.debug` tracing in `onSubmitEvent` (off) that pinpointed it. Shared panel → one fix covers all five apps. **Drive: in manifest but still untested.** |
+| G4 — Fail-closed tripwire | ✅ Done (ON by default) | happy: redacted body on Gemini endpoint not aborted / failure: raw PII on Gemini endpoint aborted (fetch+XHR) + blocked event / edge: non-Luhn digits + off-endpoint telemetry NOT aborted | ✅ 116/116 | `tripwire.js` rewritten: `luhnValid` (mirrors `src/redaction.ts`), `bodyLooksRaw` (Luhn-gated card), `shouldInspectUrl` + `DEFAULT_GEMINI_ENDPOINTS` (endpoint scoping — telemetry false-positive fixed), `extractUrl`, XHR `open`-wrap. ON by default (`config.tripwire:false` / `tripwireEndpoints` to override via storage). Endpoint list is live-tunable like the selectors — **confirm against the real Network tab**. `tests/phase-gemini-core.test.ts`. |
+| G5 — Health check + live selector watcher (Layer 2) | 🟡 Watcher done; enterprise pending | detect-only canary: composer findable on gemini / warn (not fail) on closed Workspace panel / `--self-check` validates probe headlessly | ✅ self-check 2/2 | `scripts/selector-watch.mjs` (`npm run watch:selectors`) — Playwright `launchPersistentContext` over real surfaces, JSON report to `~/.secure-llm-gateway/selector-watch-report.json`, non-zero exit on hard break; `WATCH_SEND=1` deep-checks the wire is tokenized (reuses tripwire `shouldInspectUrl`). `selectorsHealthy()` + 15s poll in `content-main.js`. **Detect-only — no auto-patch (Layer 3 out of scope).** Admin-console force-install rollout not done. |
+| G-Heal — Self-healing composer finder (Layer 1) | ✅ Done 2026-07-22 | happy: labelled composer beats small box / failure: no viable candidate → -1 / edge: zero-area Sheets decoy rejected, real composer picked | ✅ 116/116 + e2e 15/15 | `extension/src/composer-finder.js` (pure scorer: `scoreComposerCandidate`/`pickComposer`/`MIN_COMPOSER_AREA`, unit-tested). `findComposer` (`composer.js`) = **Gemini-specific** fast-path (generic catch-alls removed — they could return a wrong sane element) → heuristic fallback via `describeCandidate` + `pickComposer`. One scorer covers gemini.google.com + all Workspace apps. e2e `?dom=changed` scenario proves self-heal in real Chromium. Manifest `web_accessible_resources` +`composer-finder.js`. `tests/phase-gemini-core.test.ts`. |
+| G-Learn — Focus/fingerprint self-learning (Layer 1.5) | ✅ Done 2026-07-22 | focus-wins: focused editable beats a bigger competing box / fingerprint: matches same box, rejects diff-tag decoy / recall: saved fingerprint picks box with no focus + heuristic fallback | ✅ 116/116 + e2e 15/15 | `extension/src/composer-learn.js` (pure: `makeFingerprint`/`scoreFingerprintMatch`/`chooseComposer`, unit-tested). Priority **focus > learned fingerprint > heuristic**. Focus = the box the user types in at submit (fixes "Case B" competing boxes); fingerprint (tag/role/aria/stable classes — **no PII**) persisted via bridge to `chrome.storage.local` (`learnedComposer`), restored into MAIN on load — recalls composer after a redesign with one learned submit. Safe realization of "auto-identify" (no leak, no blind selector-patch). e2e `?dom=ambiguous` proves focus-wins in real Chromium. Manifest +`composer-learn.js`. `tests/phase-gemini-core.test.ts`. |
+| G-Workspace — Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) | ✅ Live-verified 2026-07-21 | live: Docs + Gmail + **Sheets** + Chat network-proven (raw→zero matches; token in streamGenerate/create_message) / Enter-key path works (not just the ↑ arrow) / tripwire `shouldInspectUrl` covers `streamGenerate` | ✅ 116/116 + live | **Additive, gemini.google.com untouched.** `manifest.json` +Workspace hosts (mail/docs/drive/chat) in both match arrays; `composer.js` +`div[contenteditable][aria-label*="Ask Gemini" i]` selector (appsElements, NOT Quill — top-level DOM, not shadow/iframe); `content-main.js` `fireSubmit` now picks the **enabled+visible** send button (Workspace renders a **disabled decoy** `aria="Submit"` beside the real one) and dispatches a **full pointer sequence** (Gm3 Material buttons ignore a bare synthetic click); `tripwire.js` `DEFAULT_GEMINI_ENDPOINTS` +`streamGenerate`/`appsgenaiservice` (Workspace endpoint is lowercase, on appsgenaiservice host). **Selector-order fix (Sheets):** the `aria*="Ask Gemini"` selector must precede the generic `role=textbox`/`textarea` catch-alls in `composer.js` — Sheets' empty stray `role=textbox` boxes were hijacking `findComposer` → `readText`="" → send went out unredacted; reorder fixed it (Quill still first, gemini web unaffected). `content-main.js` has `CONFIG.debug` tracing in `onSubmitEvent` (off) that pinpointed it. Shared panel → one fix covers all five apps. **Drive: in manifest but still untested.** |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)

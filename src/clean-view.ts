@@ -27,8 +27,14 @@ function blockText(content: unknown): string {
   return "";
 }
 
+/** Hook/audit entries store an EMPTY snapshot on purpose (never-persist-raw-PII),
+ *  so "parse failed" would be misleading — and raising SNAPSHOT_CHARS, as that
+ *  message suggests, would change nothing. Say what actually happened. */
+const NO_SNAPSHOT = "(no snapshot stored — counts-only audit entry, by design)";
+
 /** The real user prompt(s): user-role messages with boilerplate stripped. */
 export function extractUserPrompt(reqSnapshot: string): string {
+  if (reqSnapshot.trim() === "") return NO_SNAPSHOT;
   let obj: any;
   try {
     obj = JSON.parse(reqSnapshot);

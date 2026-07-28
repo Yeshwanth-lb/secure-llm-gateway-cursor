@@ -21,7 +21,10 @@ import { postJson, BASE_URL, STATE_DIR, log } from "./lib.mjs";
 // (or CURSOR_HOOK_CAPTURE=1). Raw stdin is appended to hook-capture.log so the
 // exact preToolUse/postToolUse field names can be confirmed from a live Cursor
 // tool call. Remove the flag file to stop. Capture only — no effect on scrubbing.
-const CAPTURE_FLAG = path.join(STATE_DIR, "hook-capture");
+// NOTE: this capture writes RAW stdin, so it has its OWN flag. The prompt hook's
+// `hook-capture` flag enables a shape-only capture (no payload) and must not
+// silently turn raw dumping on here as well.
+const CAPTURE_FLAG = path.join(STATE_DIR, "hook-capture-raw");
 const CAPTURE_LOG = path.join(STATE_DIR, "hook-capture.log");
 
 const MAX_STDIN = 2 * 1024 * 1024; // tool outputs can be large

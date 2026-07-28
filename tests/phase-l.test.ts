@@ -88,7 +88,10 @@ test("happy: postToolUse rewrites MCP tool output, replacing PII with tokens", a
 
 // --- FAILURE: gateway unreachable -> fail closed (deny / withhold, never raw) --
 test("failure: gateway down -> preToolUse denies, postToolUse withholds (no raw leak)", async () => {
-  const deadPort = port + 1; // nothing listening here
+  // Port 1 is never bindable by a test gateway. `port + 1` used to be used here,
+  // but with several test files running in parallel another file's ephemeral
+  // gateway can land on it, making this test flake.
+  const deadPort = 1;
   const raw = `card ${CC} for ${EMAIL}`;
 
   const pre = await runHook(

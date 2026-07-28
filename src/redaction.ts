@@ -29,6 +29,18 @@ function isPublicIpv4(ip: string): boolean {
   return parts[0] !== 127;
 }
 
+/** Same exemption for IPv6 loopback/unspecified. Without this the literal `::1`
+ *  is treated as PII, which blocked editing this project's own source (the
+ *  loopback-origin check cites `::1` in a comment) — a real false positive found
+ *  2026-07-27, and the IPv4 rule already makes the loopback carve-out. */
+function isPublicIpv6(ip: string): boolean {
+  const groups = ip.split(":").filter((g) => g !== "");
+  const allZeroButLast = groups.slice(0, -1).every((g) => /^0+$/.test(g));
+  const last = groups[groups.length - 1] ?? "";
+  if (groups.length === 0) return false; // "::" unspecified
+  return !(allZeroButLast && /^0*1?$/.test(last)); // ::1 / 0:0:0:0:0:0:0:1 / ::
+}
+
 /** Verhoeff checksum — kills false-positive Aadhaar matches. */
 const VERHOEFF_D = [
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -129,6 +141,7 @@ export const DEFAULT_RULES: RedactionRule[] = [
     name: "IPV6",
     pattern:
       /\b(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}\b|::(?:[0-9A-Fa-f]{1,4}:){0,5}[0-9A-Fa-f]{1,4}\b/g,
+    validate: isPublicIpv6,
   },
 ];
 
