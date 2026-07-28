@@ -11,6 +11,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createInterceptor, decideSubmission, SYNTHETIC } from "../extension/src/interceptor-core.js";
 import { bodyLooksRaw, shouldInspectUrl, installTripwire } from "../extension/src/tripwire.js";
+import { scoreComposerCandidate, pickComposer, MIN_COMPOSER_AREA } from "../extension/src/composer-finder.js";
+import { makeFingerprint, scoreFingerprintMatch, chooseComposer } from "../extension/src/composer-learn.js";
 
 // --- LOOP GUARD: our own re-submit must not be re-intercepted ---------------
 test("loop guard: real user submit is intercepted; our synthetic re-submit is not", () => {
@@ -196,4 +198,119 @@ test("G4 tripwire edge: non-Luhn digits + off-endpoint telemetry are NOT aborted
   assert.equal(res, "passed-through", "off-endpoint traffic is never aborted");
   assert.equal(calls.length, 1, "telemetry call forwarded");
   assert.equal(events.length, 0, "no blocked event for off-endpoint traffic");
+});
+
+// --- LAYER 1: heuristic self-healing composer finder (pure scorer) ----------
+// composer-finder.js scores plain descriptor objects (no DOM), so the ranking
+// logic that survives a Gemini/Workspace DOM change is testable headlessly.
+// The browser-only DOM→descriptor mapping (composer.js describeCandidate) is
+// covered by the Playwright e2e; here we prove the scoring/ranking itself.
+// Design ref: plan "Layer 1", scripts/gemini_imp.md §7 risk 3.
+
+/** A sane, real composer descriptor (big, visible, labelled, near send). */
+function realComposerDesc(over = {}) {
+  return {
+    editable: true,
+    visible: true,
+    offscreen: false,
+    area: MIN_COMPOSER_AREA * 20,
+    ariaLabel: "Ask Gemini",
+    placeholder: "",
+    role: "textbox",
+    tag: "div",
+    nearSend: true,
+    textLen: 0,
+    ...over,
+  };
+}
+
+test("composer-finder happy: real labelled composer beats a small unlabeled box", () => {
+  const candidates = [
+    // a small, unlabeled editable box (e.g. a stray inline field)
+    realComposerDesc({ ariaLabel: "", area: MIN_COMPOSER_AREA * 1.2, nearSend: false }),
+    // the genuine composer
+    realComposerDesc(),
+  ];
+  assert.equal(pickComposer(candidates), 1, "the big, labelled, near-send box wins");
+  assert.ok(
+    scoreComposerCandidate(candidates[1]) > scoreComposerCandidate(candidates[0]),
+    "real composer scores strictly higher",
+  );
+});
+
+test("composer-finder failure: no viable candidate -> pickComposer returns -1", () => {
+  const candidates = [
+    realComposerDesc({ editable: false }), // not editable
+    realComposerDesc({ visible: false }), // hidden
+    realComposerDesc({ offscreen: true }), // rendered off-screen
+  ];
+  for (const c of candidates) {
+    assert.equal(scoreComposerCandidate(c), -Infinity, "each is disqualified");
+  }
+  assert.equal(pickComposer(candidates), -1, "nothing to pick");
+});
+
+test("composer-finder edge (Sheets decoy): empty zero-area role=textbox is rejected, real composer chosen", () => {
+  // Sheets renders a stray empty contenteditable role=textbox that the old
+  // generic selector matched first, making readText() return "" and sending
+  // raw (live bug 2026-07-21). The scorer must disqualify it on area.
+  const decoy = realComposerDesc({ ariaLabel: "", area: 0, role: "textbox", textLen: 0 });
+  const real = realComposerDesc();
+  assert.equal(scoreComposerCandidate(decoy), -Infinity, "zero-area decoy disqualified");
+  assert.equal(pickComposer([decoy, real]), 1, "real composer picked over the decoy");
+});
+
+// --- LAYER 1.5: self-learning composer identification (pure core) -----------
+// composer-learn.js turns "which box the user actually submits from" into
+// ground truth: the FOCUSED editable at submit time is the composer (beats a
+// pure shape guess when two big boxes compete), and its fingerprint is
+// persisted so later loads recall it directly. Pure + headless here; the
+// focus/storage glue is covered by the e2e. Design ref: plan "Layer 1.5".
+
+function withClasses(over = {}) {
+  return realComposerDesc({ classList: ["input-area", "ProseMirror"], ...over });
+}
+
+test("composer-learn focus-wins: the FOCUSED editable beats a competing big box (Case B)", () => {
+  // A large search box (no send button, search-y label) competes with the real
+  // composer. Pure shape scoring could be fooled; focus is decisive.
+  const searchBox = realComposerDesc({ ariaLabel: "Search Drive", nearSend: false, area: MIN_COMPOSER_AREA * 50 });
+  const composer = withClasses({ ariaLabel: "Message Gemini" });
+  const d = chooseComposer({ activeIndex: 1, descriptors: [searchBox, composer], learnedFingerprint: null });
+  assert.equal(d.index, 1, "the focused composer is chosen");
+  assert.equal(d.via, "focus", "chosen via the focus signal");
+  assert.ok(d.fingerprintToPersist, "a fingerprint is produced to persist");
+});
+
+test("composer-learn fingerprint: matches the same box, rejects a different-tag decoy", () => {
+  const composer = withClasses({ ariaLabel: "Message Gemini" });
+  const fp = makeFingerprint(composer);
+  const sameShape = withClasses({ ariaLabel: "Message Gemini" });
+  const decoyDiffTag = withClasses({ tag: "textarea", ariaLabel: "Message Gemini" });
+  const decoyDiffLabel = withClasses({ ariaLabel: "Search", classList: ["search-box"] });
+  assert.equal(scoreFingerprintMatch(decoyDiffTag, fp), -Infinity, "tag mismatch is a hard no-match");
+  assert.ok(
+    scoreFingerprintMatch(sameShape, fp) > scoreFingerprintMatch(decoyDiffLabel, fp),
+    "the matching box scores higher than a different-label box",
+  );
+});
+
+test("composer-learn recall: a saved fingerprint picks the box even with no focus", () => {
+  const composer = withClasses({ ariaLabel: "Message Gemini" });
+  const fp = makeFingerprint(composer);
+  // Reload: nothing focused (activeIndex -1); a decoy and the fingerprinted box.
+  const decoy = realComposerDesc({ ariaLabel: "Search", classList: ["search-box"], area: MIN_COMPOSER_AREA * 80 });
+  const match = withClasses({ ariaLabel: "Message Gemini" });
+  const d = chooseComposer({ activeIndex: -1, descriptors: [decoy, match], learnedFingerprint: fp });
+  assert.equal(d.index, 1, "the fingerprinted composer is recalled");
+  assert.equal(d.via, "learned", "chosen via the learned fingerprint");
+  assert.equal(d.fingerprintToPersist, null, "recall does not re-persist");
+});
+
+test("composer-learn fallback: no focus + no fingerprint -> heuristic pickComposer", () => {
+  const small = realComposerDesc({ ariaLabel: "", area: MIN_COMPOSER_AREA * 1.1, nearSend: false });
+  const big = realComposerDesc();
+  const d = chooseComposer({ activeIndex: -1, descriptors: [small, big], learnedFingerprint: null });
+  assert.equal(d.index, pickComposer([small, big]), "falls back to the heuristic pick");
+  assert.equal(d.via, "heuristic", "chosen via heuristic");
 });

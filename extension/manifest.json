@@ -30,6 +30,8 @@
         "src/content-main.js",
         "src/interceptor-core.js",
         "src/composer.js",
+        "src/composer-finder.js",
+        "src/composer-learn.js",
         "src/tripwire.js"
       ],
       "matches": [

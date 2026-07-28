@@ -9,7 +9,7 @@
 // unit-tested) — this file is the DOM/event glue around that core.
 
 import { createInterceptor, decideSubmission } from "./interceptor-core.js";
-import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount } from "./composer.js";
+import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer } from "./composer.js";
 import { installTripwire } from "./tripwire.js";
 
 /**
@@ -62,6 +62,13 @@ function applyTripwire() {
 window.addEventListener("gemini-redact:config", (e) => {
   if (e && e.detail && typeof e.detail === "object") CONFIG = { ...CONFIG, ...e.detail };
   applyTripwire();
+});
+
+// LAYER 1.5 — the isolated bridge restores the persisted composer fingerprint
+// (learned from a prior focused submit) so findComposer can recall the composer
+// after a Gemini/Workspace redesign, before the user re-focuses it.
+window.addEventListener("gemini-redact:learned-composer", (e) => {
+  setLearnedComposer((e && e.detail && e.detail.fingerprint) || null);
 });
 
 /** Show the user why a send was blocked (fail-closed paths). Replace with real UI. */

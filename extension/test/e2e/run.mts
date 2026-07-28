@@ -128,6 +128,51 @@ try {
     await page.close();
   }
 
+  // ---- SELF-HEAL: reshuffled DOM + zero-area decoy -> heuristic still finds --
+  // ?dom=changed removes the exact selectors and inserts a stray zero-area
+  // role=textbox decoy (the Sheets bug shape). findComposer must fall back to
+  // the heuristic, reject the decoy on area, locate the real composer, and
+  // redact — proving Layer 1 survives a Google UI change with no code edit.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => console.log("  [pageerror]", e.message));
+    await page.goto(`${pageBase}/?dom=changed&base=${encodeURIComponent(pageBase)}`);
+    const box = page.locator("#composer");
+    await box.click();
+    await box.type(`please email ${EMAIL} today`);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => (window as any).__sent__.length >= 1, { timeout: 5000 }).catch(() => {});
+
+    const sent = await page.evaluate(() => (window as any).__sent__);
+    const calls = await page.evaluate(() => (window as any).__redactCalls__);
+    check("self-heal: exactly one send from the reshuffled DOM", sent.length === 1, `got ${sent.length}`);
+    check("self-heal: one gateway call (decoy did not hijack read)", calls === 1, `got ${calls}`);
+    check("self-heal: heuristic-found composer sent redacted text", /\[REDACTED_PII_EMAIL\]/.test(sent[0] || ""), sent[0]);
+    check("self-heal: no raw PII left the browser", !(sent[0] || "").includes("corp.com"), sent[0]);
+    await page.close();
+  }
+
+  // ---- LEARN (Layer 1.5): focus wins when a bigger box competes -------------
+  // ?dom=ambiguous removes the exact selectors and adds a BIGGER, also
+  // prompt-like editable decoy. Shape scoring alone would pick the decoy; only
+  // the focus signal (the box the user typed in) selects the real composer.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => console.log("  [pageerror]", e.message));
+    await page.goto(`${pageBase}/?dom=ambiguous&base=${encodeURIComponent(pageBase)}`);
+    const box = page.locator("#composer");
+    await box.click(); // focuses the REAL composer
+    await box.type(`please email ${EMAIL} today`);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => (window as any).__sent__.length >= 1, { timeout: 5000 }).catch(() => {});
+
+    const sent = await page.evaluate(() => (window as any).__sent__);
+    check("learn: exactly one send from the focused composer", sent.length === 1, `got ${sent.length}`);
+    check("learn: focused composer sent redacted text (not the bigger decoy)", /\[REDACTED_PII_EMAIL\]/.test(sent[0] || ""), sent[0]);
+    check("learn: no raw PII left the browser", !(sent[0] || "").includes("corp.com"), sent[0]);
+    await page.close();
+  }
+
   // ---- FAILURE: gateway unreachable -> send blocked (fail-closed) -----------
   {
     const page = await browser.newPage();

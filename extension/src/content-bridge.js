@@ -77,6 +77,33 @@ window.addEventListener("gemini-redact:log-turn", (e) => {
   }
 });
 
+// LAYER 1.5 — persist/restore the learned composer fingerprint. MAIN world
+// learns it (from a focused submit) but can't touch chrome.storage; this
+// isolated world saves it and pushes the saved one back on load. A fingerprint
+// is shape metadata only (tag/role/aria-label/class names) — never PII.
+function pushLearned(fp) {
+  window.dispatchEvent(new CustomEvent("gemini-redact:learned-composer", { detail: { fingerprint: fp || null } }));
+}
+function loadLearned() {
+  const store = (globalThis.chrome && chrome.storage && chrome.storage.local) || null;
+  if (!store) return;
+  try {
+    store.get(["learnedComposer"], (v) => pushLearned((v && v.learnedComposer) || null));
+  } catch {
+    /* non-fatal */
+  }
+}
+window.addEventListener("gemini-redact:learn-composer", (e) => {
+  const fp = (e && e.detail && e.detail.fingerprint) || null;
+  const store = (globalThis.chrome && chrome.storage && chrome.storage.local) || null;
+  if (!fp || !store) return;
+  try {
+    store.set({ learnedComposer: fp });
+  } catch {
+    /* non-fatal */
+  }
+});
+
 // Surface fail-closed blocks to the extension (badge/toast) if wired later.
 window.addEventListener("gemini-redact:blocked", (e) => {
   if (globalThis.chrome && chrome.runtime && chrome.runtime.sendMessage) {
@@ -89,6 +116,7 @@ window.addEventListener("gemini-redact:blocked", (e) => {
 });
 
 load();
+loadLearned();
 if (globalThis.chrome && chrome.storage && chrome.storage.onChanged) {
   chrome.storage.onChanged.addListener(load);
 }

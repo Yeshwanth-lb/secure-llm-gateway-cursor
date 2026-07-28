@@ -46,7 +46,9 @@ the prompt leaves the browser.
 | `src/content-bridge.js` | isolated | Relays config (`base`, `enabled`) from `chrome.storage` (managed > local) into MAIN, and relays redact requests MAIN→SW→MAIN. No PII crosses to Google — only browser↔loopback. |
 | `src/content-main.js` | MAIN | The Stage 3 core: capture-phase intercept on `document`, kill → redact → re-fire. |
 | `src/interceptor-core.js` | MAIN (pure) | **Unit-tested** control logic: loop guard, synthetic-event recognition, fail-closed decision. |
-| `src/composer.js` | MAIN | Selector-fragile DOM: find composer, read text, write via native setter + `input` event, health check. |
+| `src/composer.js` | MAIN | DOM glue: find composer (exact-selector fast-path → **heuristic self-heal** fallback), read text, write via native setter + `input` event, health check. |
+| `src/composer-finder.js` | MAIN (pure) | **Unit-tested** Layer-1 scorer: ranks candidate editable boxes by shape (size, prompt-like label, near-send) so `findComposer` survives most Google DOM changes and rejects decoys (Sheets empty `role=textbox`). No DOM access. |
+| `src/composer-learn.js` | MAIN (pure) | **Unit-tested** Layer-1.5 chooser: focus > learned fingerprint > heuristic. Turns "the box the user submits from" into ground truth; persists a PII-free fingerprint (via bridge → `chrome.storage.local`) to recall the composer after a redesign. No DOM access. |
 | `src/redact-client.js` | MAIN | `fetch` wrapper to the local gateway `/redact`. |
 | `src/tripwire.js` | MAIN | Secondary net (**ON by default**): aborts an outgoing request to Gemini's generate endpoint whose body still contains raw PII (Luhn-checked, endpoint-scoped). DOM-independent — survives Gemini UI changes. Backup to the DOM path. |
 
@@ -108,5 +110,65 @@ npm run test:gemini-e2e
 
 Proves the Stage-3 mechanics (intercept kills original, redacted text
 written+read, synthetic re-submit not re-intercepted, exactly one send, zero raw
-PII, gateway-down blocks send). It does **not** use the real gemini.google.com
-DOM or the SW/CORS plumbing end-to-end — those are the manual steps above.
+PII, gateway-down blocks send) **plus the Layer-1 self-heal** (a `?dom=changed`
+scenario removes the exact selectors + adds a zero-area decoy; the heuristic
+still finds the real composer and redacts). It does **not** use the real
+gemini.google.com DOM or the SW/CORS plumbing end-to-end — those are the manual
+steps above.
+
+## Resilience to Google DOM changes
+
+Two layers guard against Google reshuffling the DOM (exact selectors breaking):
+
+- **Layer 1 — self-healing finder (in-extension).** `findComposer` tries a
+  Gemini-specific selector fast-path first, then falls back to the heuristic
+  scorer in `composer-finder.js`. A UI change degrades to "still found by shape"
+  instead of "not found → every send blocked". Security is unchanged either way:
+  an unfindable composer still fails **closed**, and the tripwire still aborts raw
+  PII on the wire.
+- **Layer 1.5 — self-learning finder (`composer-learn.js`).** When the fast-path
+  misses, candidates are chosen by the strongest signal: **focus** (the box the
+  user is typing in at submit — decisive when several big editable boxes compete)
+  > **learned fingerprint** (persisted from a prior focused submit, so a later
+  load recalls the composer after a redesign) > heuristic shape. The fingerprint
+  is shape metadata only (tag/role/aria/stable class names — **never PII**),
+  stored in `chrome.storage.local` via the isolated bridge. This is the safe
+  realization of "auto-identify after a Google change": it learns by evidence
+  (what the user submits from), never by blindly guessing + saving a selector.
+- **Layer 2 — live selector watcher (`scripts/selector-watch.mjs`).** An
+  early-warning canary that opens the real Google surfaces and reports whether the
+  composer is still findable, so a human is alerted **before** users hit blocked
+  sends. It only detects — it does not auto-patch selectors (deliberately out of
+  scope; a machine can't pick the right composer with certainty).
+
+Self-test the watcher's probe logic headlessly (no Google login):
+
+```
+node scripts/selector-watch.mjs --self-check
+```
+
+Run it live against a **pre-logged-in** Chrome profile (cookies persist in the
+profile dir — log into Google once in the window it opens, then re-run):
+
+```
+# read-only probe (no data sent to Google)
+WATCH_PROFILE_DIR="$HOME/.secure-llm-gateway/watch-profile" npm run watch:selectors
+
+# --hold: keep the browser open so you can sign in + open each Workspace
+# "Ask Gemini" panel, then press Enter to probe those exact tabs
+WATCH_PROFILE_DIR="$HOME/.secure-llm-gateway/watch-profile" node scripts/selector-watch.mjs --hold
+
+# deep check: types a PII probe, sends, asserts the wire is tokenized (opt-in)
+WATCH_SEND=1 WATCH_PROFILE_DIR="$HOME/.secure-llm-gateway/watch-profile" npm run watch:selectors
+```
+
+Writes a JSON report to `~/.secure-llm-gateway/selector-watch-report.json` and
+exits non-zero when a surface that should always have a composer
+(gemini.google.com) is missing it, or when raw PII was seen on the wire. Workspace
+side panels only render a composer once the "Ask Gemini" panel is open, so a
+not-found there is a warning, not a hard failure. Add more surfaces with
+`WATCH_SURFACES=url1,url2`. Sample nightly cron (10:07pm local):
+
+```
+7 22 * * *  WATCH_PROFILE_DIR="$HOME/.secure-llm-gateway/watch-profile" /usr/local/bin/node /path/to/repo/scripts/selector-watch.mjs || osascript -e 'display notification "Gemini selector watch failed" with title "PII gateway"'
+```

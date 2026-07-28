@@ -11,8 +11,53 @@
   This lets us exercise the REAL content-main.js logic in a REAL browser DOM
   without packaging/loading a Chrome extension.
 -->
-<div class="ql-editor" contenteditable="true" role="textbox" aria-label="Enter a prompt here"></div>
+<style>
+  /* Give the composer a real, deterministic size so the Layer-1 area gate
+     (MIN_COMPOSER_AREA) is satisfied in headless layout. */
+  #composer { display: block; width: 480px; min-height: 60px; border: 1px solid #ccc; }
+  /* The Sheets-style stray decoy: an empty role=textbox with ZERO area. The
+     heuristic must reject it (area < MIN_COMPOSER_AREA) rather than send its
+     empty contents. Only inserted in ?dom=changed mode. */
+  #decoy { width: 0; height: 0; overflow: hidden; }
+</style>
+<div id="composer" class="ql-editor" contenteditable="true" role="textbox" aria-label="Enter a prompt here"></div>
 <button aria-label="Send">Send</button>
+
+<script>
+  // ?dom=changed simulates a Google UI reshuffle: the known exact selectors no
+  // longer match the composer (class/role/label renamed), and a zero-area
+  // role=textbox decoy is present. This forces findComposer's HEURISTIC fallback
+  // (Layer 1) — it must still locate the real composer by shape and redact.
+  const domMode = new URLSearchParams(location.search).get("dom");
+  if (domMode === "changed") {
+    const c = document.getElementById("composer");
+    c.classList.remove("ql-editor");
+    c.removeAttribute("role");
+    c.setAttribute("aria-label", "Type your prompt"); // still prompt-like, but not an exact selector
+    const decoy = document.createElement("div");
+    decoy.id = "decoy";
+    decoy.setAttribute("contenteditable", "true");
+    decoy.setAttribute("role", "textbox"); // matches a generic selector -> must be rejected on area
+    document.body.insertBefore(decoy, c);
+  }
+  // ?dom=ambiguous (Layer 1.5): exact selectors gone AND a BIGGER, also
+  // prompt-like editable box competes. Pure shape scoring would prefer the
+  // bigger decoy; only the FOCUS signal (the box the user typed in) picks the
+  // real composer. Proves focus-anchoring in a real DOM.
+  if (domMode === "ambiguous") {
+    const c = document.getElementById("composer");
+    c.classList.remove("ql-editor");
+    c.removeAttribute("role");
+    c.setAttribute("aria-label", "Message Gemini");
+    const decoy = document.createElement("div");
+    decoy.id = "decoy";
+    decoy.setAttribute("contenteditable", "true");
+    decoy.setAttribute("role", "textbox");
+    decoy.setAttribute("aria-label", "Ask the assistant"); // also prompt-like
+    decoy.style.cssText = "display:block;width:800px;height:220px;border:1px solid #999"; // BIGGER than #composer
+    document.body.insertBefore(decoy, c);
+  }
+</script>
 
 <script>
   // Capture a CLEAN fetch BEFORE content-main.js (a deferred module) installs the
@@ -55,7 +100,7 @@
   // Google. It must fire only for events content-main lets through (the
   // synthetic, redacted re-submit), never for the original killed one.
   function doSend() {
-    const box = document.querySelector(".ql-editor");
+    const box = document.getElementById("composer");
     window.__sent__.push(box.textContent);
   }
   // Bubble-phase document listener: runs AFTER content-main's capture listener,
