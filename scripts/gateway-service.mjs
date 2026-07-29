@@ -327,6 +327,22 @@ async function doctor() {
   let allOk = true;
   for (const c of checks) { log(`[${c.ok ? "OK " : "FAIL"}] ${c.name}${c.detail ? " — " + c.detail : ""}`); if (!c.ok) allOk = false; }
   log(allOk ? "doctor: all checks passed" : "doctor: FAILURES present");
+
+  // Advisory (non-failing): two Cursor prompt paths CANNOT be blocked from a hook —
+  // Cursor never invokes beforeSubmitPrompt for them. They are only AUDITED (the
+  // `unchecked` + PII pill in the Traffic Inspector = a confirmed leak). This is a
+  // documented Cursor limitation, not a gateway fault, so it never fails doctor.
+  // Cursor's auto-include-open/selected-files toggle lives in Cursor's own state
+  // store (not a plain file), so we advise rather than read it.
+  log("");
+  log("[NOTE] Cursor prompt coverage is block-on-composer-send + @-mention; AUDIT-only for");
+  log("       two paths a hook cannot see (see CURSOR_INTEGRATION_PLAN.md §7.3 / §7.1):");
+  log("         • a message QUEUED while the agent is busy (delivered with no hook call)");
+  log("         • an OPEN/SELECTED file auto-attached as <attached_files> (no @-mention)");
+  log("       Mitigate the second by disabling auto-include of open/selected files in");
+  log("       Cursor settings. A real block-side fix is upstream (Cursor must invoke");
+  log("       beforeSubmitPrompt on the queue-drain path and surface attachment content).");
+
   return allOk ? 0 : 1;
 }
 

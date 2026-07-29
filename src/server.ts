@@ -255,17 +255,29 @@ async function handleRequest(
     } catch {
       /* empty/invalid -> treated as no content */
     }
-    // Counts-only audit: record that a scrub happened, with matched rule COUNTS
-    // and NO text (snapshot stays empty) — preserves the never-persist-raw-PII
-    // invariant while making Cursor tool-data scrubs visible in the traffic log.
+    // Audit entry: record that a scrub happened, its matched rule COUNTS, and the
+    // SCRUBBED text — the same tokenised text handed back to the hook, so storing
+    // it keeps the never-persist-raw-PII invariant while letting the inspector show
+    // WHAT was scrubbed instead of an empty row. Capped by SNAPSHOT_CHARS, since a
+    // tool payload can be a whole file.
     // `audit:false` suppresses this entirely — used by the Gemini extension,
     // which logs a single richer per-turn entry via /log-turn instead (so a
     // send-time counts-only row doesn't duplicate the turn row).
     const source = typeof body.source === "string" ? body.source : "cursor:tool-scrub";
     const doAudit = body.audit !== false;
-    const audit = (matched: Record<string, number>, reqLen: number, respLen: number): void => {
+    // Which pane the text belongs in: a postToolUse scrub is what the tool
+    // RETURNED (response), anything else is what we were about to SEND (request).
+    const isOutputSide = /postToolUse/i.test(source);
+    const audit = (
+      matched: Record<string, number>,
+      reqLen: number,
+      respLen: number,
+      redacted: string,
+    ): void => {
       if (!doAudit) return;
       if (Object.keys(matched).length === 0) return; // only log scrubs that found PII
+      const cap = config.snapshotChars;
+      const snapshot = cap > 0 ? redacted.slice(0, cap) : redacted;
       const entry: LogEntry = {
         id: randomUUID(),
         timestamp: new Date().toISOString(),
@@ -276,22 +288,30 @@ async function handleRequest(
         streaming: false,
         durationMs: 0,
         charCount: { request: reqLen, response: respLen, total: reqLen + respLen },
-        payloadSnapshot: { request: "", response: "" }, // never store raw tool data
+        payloadSnapshot: isOutputSide
+          ? { request: "", response: snapshot }
+          : { request: snapshot, response: "" },
         piiDetected: true,
         matchedRules: { inbound: matched, outbound: {} },
+        // Tool payloads are raw text/JSON, not a provider envelope, so hand the
+        // clean view the text verbatim rather than letting it try to parse one.
+        clean: isOutputSide
+          ? { userPrompt: "", assistantOutput: snapshot }
+          : { userPrompt: snapshot, assistantOutput: "" },
       };
       trafficLog.push(entry);
     };
     if (typeof body.text === "string") {
       const { text, matched } = redactText(body.text, "inbound");
-      audit(matched, body.text.length, text.length);
+      audit(matched, body.text.length, text.length, text);
       sendJson(res, 200, { redacted: text, matched, piiDetected: Object.keys(matched).length > 0 });
       return;
     }
     if (body.value !== undefined) {
       const { value, matched } = redactJson(body.value, "inbound");
+      const outText = JSON.stringify(value ?? "", null, 2);
       const outLen = JSON.stringify(value ?? "").length;
-      audit(matched, JSON.stringify(body.value ?? "").length, outLen);
+      audit(matched, JSON.stringify(body.value ?? "").length, outLen, outText);
       sendJson(res, 200, { redacted: value, matched, piiDetected: Object.keys(matched).length > 0 });
       return;
     }

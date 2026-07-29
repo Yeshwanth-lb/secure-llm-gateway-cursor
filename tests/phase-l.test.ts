@@ -146,9 +146,22 @@ test("edge: preToolUse scrubs nested structured input; no-PII input left untouch
   assert.equal(clean.status, 0);
 });
 
-// --- AUDIT: a scrub records a COUNTS-ONLY log entry (no raw text) --------------
-test("audit: tool-data scrub logs a counts-only entry with an empty snapshot", async () => {
+// --- AUDIT: a scrub stores the REDACTED payload, never the raw one -------------
+// Tool rows used to store nothing at all, so the inspector showed "(empty)" and
+// you couldn't see WHAT was scrubbed — only that something was. The scrubbed text
+// is safe to keep (it's the same text we hand back to the hook, PII already
+// tokenised), so it is now stored and rendered like a chat row. Output-side scrubs
+// (postToolUse) fill the response pane, input-side scrubs (preToolUse) the request.
+test("audit: tool-data scrub logs the REDACTED payload (tokens only, never raw)", async () => {
   const base = `http://127.0.0.1:${port}`;
+  type Row = {
+    method: string; path: string; piiDetected: boolean;
+    payloadSnapshot: { request: string; response: string };
+    matchedRules: { inbound: Record<string, number> };
+    clean?: { userPrompt: string; assistantOutput: string };
+  };
+
+  // OUTPUT side: what the tool returned.
   await runHook(
     JSON.stringify({
       hook_event_name: "postToolUse",
@@ -156,20 +169,31 @@ test("audit: tool-data scrub logs a counts-only entry with an empty snapshot", a
       tool_output: `email ${EMAIL}`,
     }),
   );
-  const logs = (await (await fetch(`${base}/logs`)).json()) as {
-    entries: {
-      method: string; path: string; piiDetected: boolean;
-      payloadSnapshot: { request: string; response: string };
-      matchedRules: { inbound: Record<string, number> };
-    }[];
-  };
-  const hookEntry = logs.entries.find((e) => e.method === "HOOK");
-  assert.ok(hookEntry, "a HOOK audit entry must be recorded");
-  assert.match(hookEntry.path, /^cursor:postToolUse/, "source labels the event + tool");
-  assert.equal(hookEntry.piiDetected, true);
-  assert.ok(hookEntry.matchedRules.inbound.EMAIL >= 1, "EMAIL count recorded");
-  // The invariant: NO raw text stored anywhere in the entry.
-  assert.equal(hookEntry.payloadSnapshot.request, "", "no request text persisted");
-  assert.equal(hookEntry.payloadSnapshot.response, "", "no response text persisted");
-  assert.ok(!JSON.stringify(hookEntry).includes("example.org"), "no raw PII in the log entry");
+  const afterPost = (await (await fetch(`${base}/logs?clean=1`)).json()) as { entries: Row[] };
+  const out = afterPost.entries.find((e) => /^cursor:postToolUse/.test(e.path));
+  assert.ok(out, "a HOOK audit entry must be recorded");
+  assert.equal(out.piiDetected, true);
+  assert.ok(out.matchedRules.inbound.EMAIL >= 1, "EMAIL count recorded");
+  assert.match(out.payloadSnapshot.response, /REDACTED_PII_EMAIL/, "scrubbed output is visible");
+  assert.equal(out.payloadSnapshot.request, "", "an output scrub leaves the request pane empty");
+  assert.match(out.clean!.assistantOutput, /REDACTED_PII_EMAIL/, "and it renders in the clean view");
+
+  // INPUT side: what we were about to send to the tool.
+  await runHook(
+    JSON.stringify({
+      hook_event_name: "preToolUse",
+      tool_name: "Shell",
+      tool_input: { command: `mail ${EMAIL}` },
+    }),
+  );
+  const afterPre = (await (await fetch(`${base}/logs?clean=1`)).json()) as { entries: Row[] };
+  const inp = afterPre.entries.find((e) => /^cursor:preToolUse/.test(e.path));
+  assert.ok(inp, "an input-side audit entry must be recorded");
+  assert.match(inp.payloadSnapshot.request, /REDACTED_PII_EMAIL/, "scrubbed input is visible");
+  assert.equal(inp.payloadSnapshot.response, "", "an input scrub leaves the response pane empty");
+  assert.match(inp.clean!.userPrompt, /REDACTED_PII_EMAIL/, "and it renders in the clean view");
+
+  // The invariant that has not changed: raw PII is never persisted.
+  const stored = JSON.stringify(afterPre.entries);
+  assert.ok(!stored.includes("example.org"), "no raw PII in any log entry");
 });
