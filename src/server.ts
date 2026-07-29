@@ -91,19 +91,39 @@ function controlPlaneAllowed(req: IncomingMessage, config: GatewayConfig): boole
   return originAllowed(req, config);
 }
 
-/** CORS headers echoing a trusted loopback origin only — never a wildcard (§5). */
+/**
+ * CORS headers echoing a TRUSTED origin only — never a wildcard (§5). Two trust
+ * classes are granted:
+ *   - a loopback browser origin (127.0.0.1/localhost) → full control-plane CORS;
+ *   - a browser-extension service-worker origin (chrome-extension://) → ONLY the
+ *     hook endpoints (/detect, /redact, /log-turn), mirroring the access gate.
+ * A foreign http(s) origin gets nothing.
+ *
+ * Also answers Chrome's Private Network Access preflight: a fetch to 127.0.0.1
+ * from an extension SW (or a page) now carries `Access-Control-Request-Private-
+ * Network: true`, and Chrome BLOCKS the request unless the response echoes
+ * `Access-Control-Allow-Private-Network: true`. Without this the extension's
+ * loopback fetch fails after a Chrome update → "gateway unreachable" → every
+ * send blocked, nothing logged (regression fixed 2026-07-29).
+ */
 function corsHeaders(req: IncomingMessage): Record<string, string> {
   const origin = req.headers["origin"];
   const o = Array.isArray(origin) ? origin[0] : origin;
-  if (o && isLoopbackOrigin(o)) {
-    return {
-      "access-control-allow-origin": o,
-      "vary": "Origin",
-      "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
-      "access-control-allow-headers": "content-type,x-gateway-token,mcp-session-id",
-    };
+  if (!o) return {};
+  const path = new URL(req.url ?? "/", "http://localhost").pathname;
+  const isHookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
+  const allow = isLoopbackOrigin(o) || (isExtensionOrigin(o) && isHookPath);
+  if (!allow) return {};
+  const headers: Record<string, string> = {
+    "access-control-allow-origin": o,
+    "vary": "Origin",
+    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+    "access-control-allow-headers": "content-type,x-gateway-token,mcp-session-id",
+  };
+  if (req.headers["access-control-request-private-network"] === "true") {
+    headers["access-control-allow-private-network"] = "true";
   }
-  return {};
+  return headers;
 }
 
 const NO_ROUTE_HINT = {
@@ -128,10 +148,17 @@ async function handleRequest(
   // TEMP access log (debug Cursor validation) — path only, no bodies/secrets.
   process.stderr.write(`[access] ${new Date().toISOString()} ${method} ${req.url}\n`);
 
-  // CORS preflight short-circuit. Only a trusted loopback origin gets ACAO;
-  // a foreign origin receives no CORS grant (§5) — never a wildcard.
+  // Apply CORS to EVERY response for a trusted origin — the preflight AND the
+  // actual response need `access-control-allow-origin`, or the browser blocks
+  // the extension SW from reading the redaction result (only the preflight was
+  // covered before, which is why the SW fetch failed). setHeader now so it
+  // survives whichever sendJson/sendHtml path runs below.
+  for (const [k, v] of Object.entries(corsHeaders(req))) res.setHeader(k, v);
+
+  // CORS preflight short-circuit. Headers are already set above; a foreign
+  // origin simply got none (§5) — never a wildcard.
   if (method === "OPTIONS") {
-    res.writeHead(204, corsHeaders(req));
+    res.writeHead(204);
     res.end();
     return;
   }
