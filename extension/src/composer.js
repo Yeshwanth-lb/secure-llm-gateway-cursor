@@ -320,12 +320,19 @@ export function responseCount(root = document) {
   return resolveResponseEls(root).length;
 }
 
-/** Best-effort read of the LATEST assistant response text, or "" if none found. */
+/** Best-effort read of the LATEST assistant response text, or "" if none found.
+ *  Returns the last NON-EMPTY matching node: Gemini/Workspace often append a
+ *  trailing EMPTY node (a next-turn placeholder, a chip/feedback container) after
+ *  the reply, and reading the bare last node would intermittently return "" while
+ *  the reply is sitting right above it. Walk from the end to the first node that
+ *  actually has text. */
 export function readLatestResponse(root = document) {
   const els = resolveResponseEls(root);
-  if (!els.length) return "";
-  const last = els[els.length - 1];
-  return (last.innerText || last.textContent || "").trim();
+  for (let i = els.length - 1; i >= 0; i--) {
+    const t = (els[i].innerText || els[i].textContent || "").trim();
+    if (t) return t;
+  }
+  return "";
 }
 
 /**

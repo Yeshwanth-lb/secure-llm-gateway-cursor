@@ -235,12 +235,32 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
   //     count test misses it and those apps logged an empty response even
   //     though the selector resolved. So also treat the latest bubble's text
   //     CHANGING from this snapshot as this turn's reply.
-  const baseline = responseCount();
-  const baselineText = readLatestResponse();
-  const hasNewReply = () => {
-    if (responseCount() > baseline) return true;
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const sent = norm(sentText || rawPrompt);
+
+  // Read THIS turn's assistant reply via the semantic selectors, robustly:
+  //   - the LAST NON-EMPTY matching node (readLatestResponse skips trailing
+  //     empty placeholders), and
+  //   - NEVER the user's OWN message bubble: on some surfaces the user's message
+  //     matches the same selector, and logging it back as the "answer" (or
+  //     settling on it before the model replies) was a top cause of the flaky
+  //     "(none)". Exclude a node whose text is just our submitted prompt.
+  const readReply = () => {
     const t = readLatestResponse();
-    return t !== "" && t !== baselineText;
+    if (!t) return "";
+    return norm(t) === sent ? "" : t;
+  };
+
+  // Snapshot the PREVIOUS reply (if any) so we can tell this turn's reply apart.
+  const baselineReply = readReply();
+  // A new reply exists once the reader returns non-empty text DIFFERENT from the
+  // pre-send snapshot. TEXT-based, not node-count-based: the old count test went
+  // true the instant the user's own bubble was appended, so on a slow reply the
+  // 2.5s settle fired before the model answered and we logged empty. Driving off
+  // the (prompt-excluded) reply text means only a real model reply trips it.
+  const hasNewReply = () => {
+    const t = readReply();
+    return t !== "" && t !== baselineReply;
   };
   const shape = createResponseCapture(sentText || rawPrompt, document, composer);
   let settleTimer = null;
@@ -254,18 +274,16 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
       /* ignore */
     }
     clearTimeout(hardTimeout);
-    // Prefer the semantic/Workspace selectors whenever THIS turn produced a reply
-    // (new bubble OR changed text); fall back to shape capture, else empty. The
-    // selector path has NO min-length floor, so short replies ("Hello! How can I
-    // help?") are captured too — shape's confidence bar would otherwise drop them.
-    // If neither path sees a new reply (e.g. hard timeout), log EMPTY rather than
-    // a stale earlier reply — a wrong pairing in an audit log is worse than none.
-    const viaSelectors = hasNewReply();
-    const response = viaSelectors ? readLatestResponse() : shape.read();
+    // Selector path first (covers gemini.google.com + the Docs/Sheets/Slides
+    // panel), no min-length floor so short replies survive. ALWAYS fall back to
+    // shape capture when the selector read is empty — the old code logged "" when
+    // the selector path was "new" but momentarily read empty, never trying shape.
+    const sel = hasNewReply() ? readReply() : "";
+    const response = sel || shape.read();
     if (CONFIG.debug) {
       console.info(
         "[gemini-redact] turn captured via",
-        viaSelectors ? "selectors" : response ? "shape" : "nothing",
+        sel ? "selectors" : response ? "shape" : "nothing",
         "responseLen=" + response.length,
       );
     }
