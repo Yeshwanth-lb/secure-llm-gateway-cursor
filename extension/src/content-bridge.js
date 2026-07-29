@@ -11,7 +11,7 @@
 // MAIN-world defaults (tripwire ON, built-in endpoint list) unless managed/local
 // storage explicitly overrides them. Only keys present in storage are relayed.
 const DEFAULTS = { base: "http://127.0.0.1:8001", enabled: true };
-const CONFIG_KEYS = ["base", "enabled", "tripwire", "tripwireEndpoints"];
+const CONFIG_KEYS = ["base", "enabled", "tripwire", "tripwireEndpoints", "debug"];
 
 function push(cfg) {
   window.dispatchEvent(new CustomEvent("gemini-redact:config", { detail: cfg }));

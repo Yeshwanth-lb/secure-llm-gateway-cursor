@@ -10,6 +10,7 @@
 
 import { createInterceptor, decideSubmission } from "./interceptor-core.js";
 import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer } from "./composer.js";
+import { createResponseCapture } from "./response-capture.js";
 import { installTripwire } from "./tripwire.js";
 
 /**
@@ -51,7 +52,17 @@ const ix = createInterceptor();
 // send is aborted rather than leaked. DOM interception remains the primary,
 // clean-redaction mechanism. Set config `tripwire:false` (managed/local storage)
 // to disable, or `tripwireEndpoints` to tune the inspected-URL list.
-let CONFIG = { base: "http://127.0.0.1:8001", enabled: true, tripwire: true, debug: false };
+// `settleMs`/`turnTimeoutMs` govern per-turn response capture: how long the
+// reply must stop changing before we call it finished, and the hard cap after
+// which the turn is logged regardless (prompt-only if no reply was captured).
+let CONFIG = {
+  base: "http://127.0.0.1:8001",
+  enabled: true,
+  tripwire: true,
+  debug: false,
+  settleMs: 2500,
+  turnTimeoutMs: 30000,
+};
 let tripwireInstalled = false;
 function applyTripwire() {
   if (CONFIG.tripwire && !tripwireInstalled) {
@@ -162,7 +173,7 @@ async function onSubmitEvent(event) {
   // gateway redacts it server-side before storing (same loopback path /redact
   // already uses), which makes the inspector's PII flag + rule counts ACCURATE
   // while still persisting only redacted text.
-  captureAndLogTurn(text);
+  captureAndLogTurn(text, decision.text, composer);
 }
 
 /**
@@ -172,13 +183,34 @@ async function onSubmitEvent(event) {
  * redacted text — sending the raw prompt here just lets the inspector show
  * accurate PII flags/counts. Best-effort: a hard timeout guarantees the turn is
  * logged (prompt-only) even if the response can't be captured.
+ *
+ * Two capture paths, in this order:
+ *   1. The semantic RESPONSE_SELECTORS (gemini.google.com + the appsElements
+ *      panel in Docs/Sheets/Slides). Unchanged, so those surfaces don't move.
+ *   2. Shape-based capture anchored on the text we just sent
+ *      (response-capture.js), for the obfuscated panels — Gmail, Drive, Chat —
+ *      whose class names rotate every Google deploy. Those used to log "(none)".
+ * Both can still yield "", which stays the honest answer: a wrong prompt↔reply
+ * pairing in an audit log is worse than a blank one.
  */
-function captureAndLogTurn(rawPrompt) {
+function captureAndLogTurn(rawPrompt, sentText, composer) {
   const model = getModel();
-  // Snapshot how many assistant-response nodes exist BEFORE our reply arrives.
-  // We only capture once a NEW node appears past this baseline — otherwise we'd
-  // grab the PREVIOUS turn's reply and mispair prompt↔response in the log.
+  // Snapshot the assistant-response state BEFORE our reply arrives, so we only
+  // capture THIS turn's reply and never mispair a previous turn's answer.
+  //   - count: gemini.google.com appends a NEW node per turn (count grows).
+  //   - text: the Workspace side panel (Docs/Gmail/Chat/…) streams the reply
+  //     INTO an EXISTING bubble, so the node count does NOT grow — a pure
+  //     count test misses it and those apps logged an empty response even
+  //     though the selector resolved. So also treat the latest bubble's text
+  //     CHANGING from this snapshot as this turn's reply.
   const baseline = responseCount();
+  const baselineText = readLatestResponse();
+  const hasNewReply = () => {
+    if (responseCount() > baseline) return true;
+    const t = readLatestResponse();
+    return t !== "" && t !== baselineText;
+  };
+  const shape = createResponseCapture(sentText || rawPrompt, document, composer);
   let settleTimer = null;
   let done = false;
   const finish = () => {
@@ -190,21 +222,40 @@ function captureAndLogTurn(rawPrompt) {
       /* ignore */
     }
     clearTimeout(hardTimeout);
-    // If no new response node ever appeared (e.g. hard timeout, or capture
-    // failed), log an EMPTY response rather than a stale earlier reply — a
-    // wrong pairing in an audit log is worse than a missing one.
-    const response = responseCount() > baseline ? readLatestResponse() : "";
+    // Prefer the semantic/Workspace selectors whenever THIS turn produced a reply
+    // (new bubble OR changed text); fall back to shape capture, else empty. The
+    // selector path has NO min-length floor, so short replies ("Hello! How can I
+    // help?") are captured too — shape's confidence bar would otherwise drop them.
+    // If neither path sees a new reply (e.g. hard timeout), log EMPTY rather than
+    // a stale earlier reply — a wrong pairing in an audit log is worse than none.
+    const viaSelectors = hasNewReply();
+    const response = viaSelectors ? readLatestResponse() : shape.read();
+    if (CONFIG.debug) {
+      console.info(
+        "[gemini-redact] turn captured via",
+        viaSelectors ? "selectors" : response ? "shape" : "nothing",
+        "responseLen=" + response.length,
+      );
+    }
     window.dispatchEvent(
       new CustomEvent("gemini-redact:log-turn", { detail: { prompt: rawPrompt, response, model } }),
     );
   };
-  // Start the "settled" countdown only once a NEW reply node has appeared; reset
-  // it on every subsequent mutation (streaming). Quiet for 2.5s after the new
-  // node exists ⇒ reply finished.
+  // Start the "settled" countdown only once the reply is visible to EITHER path;
+  // reset it on every subsequent mutation (streaming). Quiet for 2.5s after that
+  // ⇒ reply finished.
   const obs = new MutationObserver(() => {
-    if (responseCount() <= baseline) return; // reply not rendered yet
+    // Selector path first (new bubble or changed text); it covers gemini.google.com
+    // AND the Workspace panel, so we only walk the DOM by shape when it has nothing.
+    if (hasNewReply()) {
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(finish, CONFIG.settleMs);
+      return;
+    }
+    shape.sample();
+    if (!shape.hasCandidate()) return; // reply not rendered yet
     clearTimeout(settleTimer);
-    settleTimer = setTimeout(finish, 2500);
+    settleTimer = setTimeout(finish, CONFIG.settleMs);
   });
   try {
     obs.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -212,7 +263,7 @@ function captureAndLogTurn(rawPrompt) {
     /* if observation fails, the hard timeout still logs the turn */
   }
   // Hard cap so a turn always logs even if streaming never visibly "settles".
-  const hardTimeout = setTimeout(finish, 30000);
+  const hardTimeout = setTimeout(finish, CONFIG.turnTimeoutMs);
 }
 
 /**
