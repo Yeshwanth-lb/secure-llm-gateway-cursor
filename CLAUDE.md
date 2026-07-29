@@ -332,6 +332,16 @@ distinct from a queued send: the hook *does* fire, it just can't see the attachm
  or a Cursor setting to disable auto-include of open/selected files. `tests/phase-o.test.ts`.
  Suite 130/130.
 
+**Unblockable-leak desktop alert + upstream writeup (2026-07-29):** The `unchecked`+PII
+pill is easy to miss and neither path can be blocked, so a confirmed leak now also fires a
+**best-effort desktop notification** (`lib.mjs` `notifyDesktop`, macOS `osascript` / Linux
+`notify-send`, zero-dep, fail-open, **counts only — never the leaked text**), gated by the
+pure `isConfirmedLeak(turn, json)` in `cursor-turn-log-hook.mjs`. Suppress with
+`GATEWAY_NO_DESKTOP_NOTIFY=1` (set in the hook tests). `doctor` now prints a non-failing
+`[NOTE]` naming the two unblockable paths + the mitigation. Both Cursor feature requests are
+written up file-ready in **`CURSOR_UPSTREAM_REQUESTS.md`** (invoke `beforeSubmitPrompt` on
+queue-drain; surface auto-attached file content). `tests/leak-alert.test.ts` (3/3). Suite 133/133.
+
 **IPv6 loopback false positive — FIXED (2026-07-27):** The `IPV6` rule had no `validate`,
 so the literal `::1` was treated as PII. This **blocked editing this project's own
 `src/server.ts`** (its loopback-origin check cites `::1` in a comment) — the block hook is

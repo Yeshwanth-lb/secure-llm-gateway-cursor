@@ -18,7 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { postJson, STATE_DIR, log } from "./lib.mjs";
+import { postJson, STATE_DIR, log, isConfirmedLeak, notifyDesktop } from "./lib.mjs";
 
 const MAX_STDIN = 512 * 1024;
 const MAX_TEXT = 200 * 1024; // per side; the gateway caps its own snapshot too
@@ -265,11 +265,21 @@ for (const turn of turns) {
     // have stopped it, so the audit trail is the only signal an operator gets.
     // Two unblockable paths — a queued send (turn.unchecked) and an auto-attached
     // file/selection (turn.scanExtra) — both surface as piiDetected here.
-    if ((turn.unchecked || turn.scanExtra) && json?.piiDetected) {
+    if (isConfirmedLeak(turn, json)) {
       log(
         "cursor-turn-log-hook: PII reached the model in a send the PII gate never saw " +
           "(a queued message or an auto-attached open/selected file — Cursor invokes no " +
           "block hook on either path); logged as an unchecked turn",
+      );
+      // Also surface it out-of-terminal: the Inspector pill is easy to miss, and
+      // this path can't be blocked, so an operator alert is the only live signal.
+      // Counts only — never the leaked text (we don't have it here anyway).
+      const kinds = [turn.unchecked && "queued send", turn.scanExtra && "attached file"]
+        .filter(Boolean)
+        .join(" + ");
+      notifyDesktop(
+        "PII leak in Cursor (unblockable)",
+        `Raw PII reached the model via ${kinds || "an unchecked send"}. See the Traffic Inspector (unchecked + PII).`,
       );
     }
     known.add(hash);

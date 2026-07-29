@@ -6,7 +6,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 /** Repo root = parent of this scripts/ dir. Never hard-code an absolute path. */
@@ -260,6 +260,49 @@ export function writeJson(file, obj) {
 
 export function log(msg) {
   process.stderr.write(msg + "\n"); // diagnostics on stderr; never secrets
+}
+
+/** A turn is a CONFIRMED leak when raw PII reached the model on a path the block
+ *  hook could never see: a queued send (`unchecked`) or an auto-attached open/
+ *  selected file (`scanExtra`), AND the gateway reported PII in it. Pure — the
+ *  decision is unit-testable without spawning the hook or a real gateway. `json`
+ *  is the /log-turn response; a missing/!ok response is not a confirmed leak. */
+export function isConfirmedLeak(turn, json) {
+  const flagged = !!(turn && (turn.unchecked || turn.scanExtra));
+  return flagged && !!(json && json.piiDetected === true);
+}
+
+/** Best-effort desktop notification for a confirmed leak the operator would
+ *  otherwise only see as a pill in the Traffic Inspector. Fail-OPEN and never
+ *  throws — a missing notifier must never break a (fail-open) logging hook.
+ *  The body is caller-supplied and MUST NOT contain raw PII (callers only have
+ *  counts, never the leaked text). Suppressed entirely by GATEWAY_NO_DESKTOP_NOTIFY=1
+ *  (set in tests + by anyone who doesn't want popups). Returns true if a notifier
+ *  was launched, false if suppressed/unsupported. */
+export function notifyDesktop(title, body) {
+  if (process.env.GATEWAY_NO_DESKTOP_NOTIFY === "1") return false;
+  const t = String(title || "").slice(0, 200);
+  const b = String(body || "").slice(0, 400);
+  try {
+    if (process.platform === "darwin") {
+      // AppleScript string literals: escape backslash and double-quote only.
+      const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const script = `display notification "${esc(b)}" with title "${esc(t)}"`;
+      const cp = spawn("osascript", ["-e", script], { stdio: "ignore", detached: true });
+      cp.on("error", () => {}); // no notifier present -> ignore
+      cp.unref();
+      return true;
+    }
+    if (process.platform === "linux") {
+      const cp = spawn("notify-send", [t, b], { stdio: "ignore", detached: true });
+      cp.on("error", () => {});
+      cp.unref();
+      return true;
+    }
+    return false; // win32 / other: no zero-dep notifier we rely on
+  } catch {
+    return false;
+  }
 }
 
 /** Remove prior gateway SessionStart hooks before writing a fresh remote/local hook. */

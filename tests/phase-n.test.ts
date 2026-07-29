@@ -55,6 +55,7 @@ function runHook(hook: string, input: string, stateDir: string) {
         GATEWAY_PORT: String(port),
         GATEWAY_ENV_BOOTSTRAPPED: "1",
         GATEWAY_STATE_DIR: stateDir,
+        GATEWAY_NO_DESKTOP_NOTIFY: "1", // no GUI popups during tests
       },
     });
     let stdout = "";

@@ -83,3 +83,51 @@ Prevention being impossible from a hook, both paths are **audited, not blocked**
 
 This makes both bypasses visible after the fact. Only a Cursor-side change makes them
 preventable.
+
+---
+
+## How to file these
+
+Cursor has **no public GitHub issue tracker** (`cursor/cursor` has issues disabled). The
+channels are:
+
+- **Community forum → Feature Requests:** <https://forum.cursor.com> (Discourse, needs a
+  web login). Best fit — these are enhancement asks. Paste-ready post below.
+- **In-app:** Help → Report Issue, or `Cmd+Shift+P` → "Report AI Action" (that path is for
+  bugs tied to a specific Request ID; not needed for a feature request).
+- **Bug Reports category** (<https://forum.cursor.com/c/support/bug-report/6>) is an
+  alternative framing — the queue path is arguably a security bug, not just a request.
+
+Posting is outward-facing and goes out under your forum identity, so it is left for a human
+to submit. Sources: [forum](https://forum.cursor.com/), [Bug Reports
+category](https://forum.cursor.com/c/support/bug-report/6), [reporting-bugs
+docs](https://cursor.com/help/troubleshooting/reporting-bugs).
+
+### Paste-ready forum post (Feature Requests)
+
+> **Title:** Security hooks can't see two prompt paths — queued sends and auto-attached open/selected files
+>
+> **Body:**
+>
+> We build a local PII-redaction gateway that uses `beforeSubmitPrompt` / `beforeReadFile`
+> hooks to block prompts containing sensitive data before they reach the model. Two paths
+> deliver user content to the model with **no hook invocation that can see or gate it**, so
+> we can only audit them after the fact, never prevent the leak. Both would be closed by a
+> hook-payload change.
+>
+> **1. Queued messages skip `beforeSubmitPrompt` entirely.** A message typed while the agent
+> is busy is queued and later delivered to the model with no `beforeSubmitPrompt` call at all
+> — not an allow, not a deny. An idle composer send fires the hook correctly; the queue-drain
+> path does not. *Request:* invoke `beforeSubmitPrompt` for every message delivered to the
+> model, including drained-from-queue ones, with the same allow/deny contract.
+>
+> **2. Auto-attached open/selected files aren't in the hook payload.** A file that's open or
+> selected (no `@`-mention) is auto-inlined as an `<attached_files>` block in the request,
+> but that content never appears in the `beforeSubmitPrompt` payload — the hook sees only the
+> typed prompt and `type:"rule"` path refs. So a hook cannot scan or deny the attached file.
+> *Request:* include auto-attached file content (or resolvable paths + line ranges) in the
+> `beforeSubmitPrompt` payload, **or** add a documented setting to disable auto-inclusion of
+> open/selected files.
+>
+> Either change lets a hook enforce policy on these paths instead of only observing the leak.
+> Happy to share reproduction details.

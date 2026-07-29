@@ -62,6 +62,7 @@ function runHook(input: string, opts: { port?: number; stateDir?: string } = {})
         GATEWAY_PORT: String(opts.port ?? port),
         GATEWAY_ENV_BOOTSTRAPPED: "1",
         GATEWAY_STATE_DIR: opts.stateDir ?? tmpDir,
+        GATEWAY_NO_DESKTOP_NOTIFY: "1", // no GUI popups during tests
       },
     });
     let stdout = "";
