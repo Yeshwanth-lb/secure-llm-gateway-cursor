@@ -63,9 +63,31 @@ let CONFIG = {
   settleMs: 2500,
   turnTimeoutMs: 30000,
 };
+// With `all_frames: true` the content script also loads inside the Google
+// Workspace Gemini panel, which Gmail/Drive render in a CROSS-ORIGIN
+// `chat.google.com` iframe (the "gtn-brain" frame) — the only way to reach the
+// reply/composer that live there. But it ALSO loads in unrelated Google
+// subframes (ogs widgets, the dynamic-email relay, about:blank). We must arm the
+// fail-closed submit interceptor + tripwire ONLY where a Gemini surface actually
+// is, or a stray Enter/click in one of those frames would be blocked. Arm in:
+//   - the TOP frame — gemini.google.com, or a Workspace app whose panel renders
+//     in the top document (Docs/Sheets/Slides via appsElements); or
+//   - a chat.google.com subframe — the Gemini panel used by Gmail/Drive.
+// Every other subframe stays completely inert (no listeners, no tripwire).
+function isArmableFrame() {
+  if (window.top === window) return true; // top frame — unchanged behavior
+  return location.hostname === "chat.google.com";
+}
+const ARMED = isArmableFrame();
+// Whether a Gemini composer has EVER been found in this frame. Gates fail-closed:
+// a frame that never had a composer is not a Gemini surface, so it must not block
+// the user's ordinary submits (fixes the Gmail top-frame "can't find composer"
+// flood, where the real composer is in the panel iframe).
+let sawComposer = false;
+
 let tripwireInstalled = false;
 function applyTripwire() {
-  if (CONFIG.tripwire && !tripwireInstalled) {
+  if (ARMED && CONFIG.tripwire && !tripwireInstalled) {
     installTripwire(window, CONFIG.tripwireEndpoints ? { endpoints: CONFIG.tripwireEndpoints } : {});
     tripwireInstalled = true;
   }
@@ -111,9 +133,19 @@ async function onSubmitEvent(event) {
   }
 
   const composer = findComposer();
+  if (composer) sawComposer = true;
   if (CONFIG.debug) console.info("[gemini-redact] submit seen:", event.type, "composerFound=", !!composer);
   if (!composer) {
-    // Can't read what's being sent -> fail closed rather than let it pass.
+    // No composer in THIS frame. Two very different cases:
+    //   - this frame IS a Gemini surface whose composer we've seen before (its
+    //     selectors just broke) -> FAIL CLOSED, block the send; or
+    //   - this frame simply hosts no Gemini composer (e.g. the Gmail top frame,
+    //     whose composer lives in the chat.google.com panel iframe, or any other
+    //     armed-but-composerless frame) -> stay INERT so we don't block the user's
+    //     ordinary Enter/click there.
+    // `sawComposer` distinguishes them: we only fail closed once this frame has
+    // actually had a Gemini composer at least once.
+    if (!sawComposer) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     notifyBlocked("selectors-broken");
@@ -323,25 +355,33 @@ function fireSubmit(composer) {
   }
 }
 
-// Register as early and as high as possible: document, capture phase, for both
-// the Enter key and click paths. Capture ensures we run before Gemini's own
-// handlers (§7 risk 4).
-document.addEventListener("keydown", (e) => {
-  // Enter (without Shift) is Gemini's send gesture.
-  if (e.key === "Enter" && !e.shiftKey) onSubmitEvent(e);
-}, true);
-document.addEventListener("click", (e) => {
-  const el = e.target;
-  if (el && el.closest && el.closest('button[aria-label*="Send" i], button[aria-label*="Submit" i], button[data-testid*="send" i]')) {
-    onSubmitEvent(e);
-  }
-}, true);
+// Only arm the interceptor in a Gemini-surface frame (see isArmableFrame). In
+// any other subframe pulled in by all_frames we install NOTHING, so a stray
+// Enter/click there is never intercepted or blocked.
+if (ARMED) {
+  // Register as early and as high as possible: document, capture phase, for both
+  // the Enter key and click paths. Capture ensures we run before Gemini's own
+  // handlers (§7 risk 4).
+  document.addEventListener("keydown", (e) => {
+    // Enter (without Shift) is Gemini's send gesture.
+    if (e.key === "Enter" && !e.shiftKey) onSubmitEvent(e);
+  }, true);
+  document.addEventListener("click", (e) => {
+    const el = e.target;
+    if (el && el.closest && el.closest('button[aria-label*="Send" i], button[aria-label*="Submit" i], button[data-testid*="send" i]')) {
+      onSubmitEvent(e);
+    }
+  }, true);
 
-// Periodic health check (Stage 5): if selectors break, announce so the isolated
-// world / UI can fail closed. Runs light; real deployment wires this to a badge.
-setInterval(() => {
-  const h = selectorsHealthy();
-  if (!h.healthy) notifyBlocked("selectors-broken");
-}, 15000);
+  // Periodic health check (Stage 5): if selectors break, announce so the isolated
+  // world / UI can fail closed. Runs light; real deployment wires this to a badge.
+  setInterval(() => {
+    const h = selectorsHealthy();
+    if (h.composer) sawComposer = true;
+    // Only warn once this frame is known to be a Gemini surface (a composer was
+    // seen before) — otherwise a composerless armed frame would spam "broken".
+    if (!h.healthy && sawComposer) notifyBlocked("selectors-broken");
+  }, 15000);
 
-console.info("[gemini-redact] content script active (MAIN world)");
+  console.info("[gemini-redact] content script active (MAIN world) frame=", location.host);
+}

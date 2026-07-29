@@ -21,7 +21,8 @@
       ],
       "js": ["src/content-bridge.js", "src/loader.js"],
       "run_at": "document_start",
-      "world": "ISOLATED"
+      "world": "ISOLATED",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [
@@ -32,6 +33,8 @@
         "src/composer.js",
         "src/composer-finder.js",
         "src/composer-learn.js",
+        "src/response-capture.js",
+        "src/response-finder.js",
         "src/tripwire.js"
       ],
       "matches": [
