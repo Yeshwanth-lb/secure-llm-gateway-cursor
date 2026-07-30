@@ -279,16 +279,8 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
   };
   // Snapshot the PREVIOUS reply so we can tell this turn's reply apart.
   const baselineReply = replyText();
-  // Ready to LOG only once the model has STOPPED generating (no visible Stop
-  // control) AND a real, non-placeholder reply is present that differs from the
-  // pre-send snapshot. Gating on isGenerating() is what stops us settling on an
-  // intermediate "Collecting info…" while the answer is still being produced.
-  const replyReady = () => {
-    if (isGenerating()) return false;
-    const t = replyText();
-    return t !== "" && t !== baselineReply;
-  };
   let settleTimer = null;
+  let lastReply = "";
   let done = false;
   const finish = () => {
     if (done) return;
@@ -310,18 +302,22 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
       new CustomEvent("gemini-redact:log-turn", { detail: { prompt: rawPrompt, response, model } }),
     );
   };
-  // Arm the 2.5s "settled" countdown ONLY once a real reply is READY (generation
-  // finished + non-placeholder). While Gemini is still generating or showing a
-  // placeholder, cancel any pending settle and keep waiting; the hard timeout is
-  // the backstop for a reply that never settles.
+  // Arm the "settled" countdown once a real (non-placeholder) reply is present,
+  // and RESTART it only when the reply TEXT changes (streaming) — NOT on every
+  // stray mutation. Restarting on any mutation meant an idle page whose "Stop"
+  // control lingered (or that kept mutating) never settled and only logged at the
+  // hard-timeout ~a minute later. The quiet window is short once generation has
+  // clearly finished, and a few seconds longer as a fallback while a Stop control
+  // is still shown, so even a surface where that signal lingers logs in seconds.
   const obs = new MutationObserver(() => {
     shape.sample();
-    if (replyReady()) {
+    const t = replyText();
+    if (t === "" || t === baselineReply) return; // no real reply yet
+    if (t !== lastReply) {
+      lastReply = t;
       clearTimeout(settleTimer);
-      settleTimer = setTimeout(finish, CONFIG.settleMs);
-    } else if (settleTimer) {
-      clearTimeout(settleTimer);
-      settleTimer = null;
+      const quiet = isGenerating() ? CONFIG.settleMs * 3 : CONFIG.settleMs;
+      settleTimer = setTimeout(finish, quiet);
     }
   });
   try {
