@@ -40,10 +40,22 @@ test("looksLikeMetadata: sender/timestamp chrome is metadata; real replies are n
   assert.equal(looksLikeMetadata("You , 1 min , super bro a , 1 min ,"), true);
   assert.equal(looksLikeMetadata("Gemini · 12 min"), true);
   assert.equal(looksLikeMetadata("You , 5:42 PM"), true);
-  // Real replies — including a short one and one that mentions a time word —
-  // must NOT be treated as metadata.
+  // A prior user message stamped with its timestamp (the second garbage form seen
+  // live) — an isolated "1 min" piece gives it away even though the message text
+  // dominates the length.
+  assert.equal(looksLikeMetadata("my email is [REDACTED_PII_EMAIL] , 1 min ,"), true);
+  assert.equal(looksLikeMetadata("had lunch? , 2 min"), true);
+  // Real replies — a short one, a medium one WITH commas but no isolated stamp,
+  // and a long one that merely mentions a time word — must NOT be metadata.
   assert.equal(looksLikeMetadata("Understood. Acknowledged."), false);
   assert.equal(looksLikeMetadata("Hello! How can I assist you today?"), false);
+  assert.equal(looksLikeMetadata("Sure, I can help with that, no problem at all."), false);
+  assert.equal(
+    looksLikeMetadata(
+      "Hi Yeshwanth, I'm here to help you stay on top of your day and get things done. I can assist with catching up on messages, scheduling meetings, or drafting emails. What can I help you with today?",
+    ),
+    false,
+  );
   assert.equal(
     looksLikeMetadata("Sure — I'll remind you in about 5 minutes once the export finishes running."),
     false,

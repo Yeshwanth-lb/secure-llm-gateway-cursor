@@ -55,11 +55,20 @@ const META_PIECE =
  */
 export function looksLikeMetadata(text) {
   const n = (text || "").replace(/\s+/g, " ").trim();
-  if (!n || n.length >= 60) return false; // real replies are longer; don't touch them
+  if (!n) return false;
   const pieces = n.split(/[,\n·|]+/).map((s) => s.trim()).filter(Boolean);
   if (pieces.length === 0) return false;
   const meta = pieces.filter((p) => META_PIECE.test(p)).length;
-  return meta >= Math.ceil(pieces.length * 0.6);
+  // (a) a SHORT block that is mostly sender/timestamp fragments.
+  if (n.length < 60 && meta >= Math.ceil(pieces.length * 0.6)) return true;
+  // (b) ANY isolated sender/timestamp fragment in a non-long block ⇒ a message-
+  //     LIST row: a bubble stamped with its own "1 min" / "Ask Gemini". A clean
+  //     reply never has "1 min" as its OWN delimited piece; it only appears when
+  //     we've grabbed a list row (often the user's NEXT message + its stamp,
+  //     which mispairs). The length guard lets a long reply that merely lists a
+  //     time ("in about 5 minutes") through untouched.
+  if (n.length < 200 && meta >= 1) return true;
+  return false;
 }
 
 /**
