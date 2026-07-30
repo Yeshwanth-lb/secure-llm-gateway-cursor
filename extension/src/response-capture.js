@@ -18,14 +18,16 @@
 //
 // Design ref: WORKSPACE_COVERAGE.md §5.6 (the three panel DOMs).
 
-import { pickResponse, MIN_RESPONSE_LEN, MIN_CONFIDENT_RESPONSE_LEN } from "./response-finder.js";
+import { pickResponse, MIN_RESPONSE_LEN } from "./response-finder.js";
 
 /** Don't re-walk the DOM more often than this (streaming fires many mutations). */
 const SAMPLE_INTERVAL_MS = 250;
 /** How far up from the anchor we look for a container that holds the reply too.
- *  The obfuscated panels (Chat/Gmail/Drive) nest deeply, so this must be generous
- *  or the reply ends up outside scope and is never captured. */
-const MAX_SCOPE_HOPS = 16;
+ *  Kept TIGHT on purpose: widening it (tried in 9314f14) made the shape finder on
+ *  Chat's obfuscated DOM climb into the message-LIST container and log sender
+ *  labels + timestamps ("Ask Gemini , 1 min ,") as the reply — a wrong pairing,
+ *  which is worse than a blank one. Reverted. */
+const MAX_SCOPE_HOPS = 8;
 /** Safety valve: never score more candidates than this in one pass. */
 const MAX_CANDIDATES = 600;
 /** Cap what we hand to the gateway (it stores a snapshot, not a transcript). */
@@ -122,28 +124,18 @@ function findPromptAnchor(root, needle, skip) {
 }
 
 /**
- * Ancestor of `anchor` that also holds the REPLY — it bounds the candidate walk.
- *
- * The reply is a SIBLING subtree of the user's message, not a child of it, so the
- * scope must climb past the user's own message wrapper to a common container that
- * holds both. The old threshold (anchorLen + MIN_RESPONSE_LEN ≈ prompt + 2 chars)
- * stopped at the very first ancestor — the message bubble plus its avatar /
- * timestamp — which never contains the reply, so on the obfuscated panels
- * (Chat/Gmail/Drive) the reply sat outside scope and was never captured.
- *
- * Now we climb until an ancestor holds a REPLY's worth of text BEYOND the anchor's
- * own subtree (≥ MIN_CONFIDENT_RESPONSE_LEN more), i.e. it demonstrably contains
- * the answer and not just the prompt. `candidatesNow` still restricts to elements
- * that FOLLOW the anchor in document order, so older messages in that container
- * are excluded. Falls back to the highest ancestor reached within the hop cap.
+ * Smallest ancestor of `anchor` that also holds other content — the reply lands
+ * in here, so it bounds the candidate walk. Kept tight (see MAX_SCOPE_HOPS): a
+ * wider scope on the obfuscated panels pulls in the whole message list, and the
+ * shape finder then logs sender/timestamp metadata as the reply.
  */
 function findScope(anchor) {
   const anchorLen = textOf(anchor).length;
   let el = anchor.parentElement;
-  let last = anchor;
+  let last = null;
   for (let i = 0; i < MAX_SCOPE_HOPS && el; i++) {
     last = el;
-    if (textOf(el).length >= anchorLen + MIN_CONFIDENT_RESPONSE_LEN) return el;
+    if (textOf(el).length >= anchorLen + MIN_RESPONSE_LEN) return el;
     el = el.parentElement;
   }
   return last;
