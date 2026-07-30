@@ -205,6 +205,15 @@ export function writeText(el, text) {
   // the editor listens to: focus, select all, then execCommand insertText.
   // execCommand is deprecated but remains the most reliable cross-framework way
   // to edit a contenteditable such that Quill/Angular observe the change.
+  //
+  // KNOWN LIMITATION — Firefox + Google Workspace panel (Docs/Sheets/Gmail/Drive/
+  // Chat): this updates the VISIBLE text but Gemini's Angular model keeps the raw
+  // value, so it XHRs the raw email. The G4 tripwire catches that and ABORTS the
+  // send ("Something went wrong") — so there is NO LEAK, but a PII message can't be
+  // sent from a Workspace panel on Firefox. gemini.google.com (Quill) is fine on
+  // Firefox. An input-event/beforeinput rewrite was tried and did NOT make the
+  // Workspace model sync on Firefox, so it was reverted rather than ship an
+  // unproven change on this security-critical path. See CLAUDE.md.
   try {
     el.focus();
     const sel = window.getSelection();
