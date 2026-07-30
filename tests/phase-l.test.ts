@@ -197,3 +197,29 @@ test("audit: tool-data scrub logs the REDACTED payload (tokens only, never raw)"
   const stored = JSON.stringify(afterPre.entries);
   assert.ok(!stored.includes("example.org"), "no raw PII in any log entry");
 });
+
+// --- EDGE: a >64KB scrubbed payload is emitted WHOLE, not truncated -----------
+// emit() used to process.exit() immediately after process.stdout.write(). Writes
+// to a pipe above the ~64KB OS buffer are asynchronous, so the exit discarded the
+// tail: Cursor received invalid JSON and the tool failed closed. Any large file
+// rewrite that legitimately contained an email/IP was uneditable. Guards the
+// flush-before-exit fix (write callback).
+test("edge: a large (>64KB) scrubbed preToolUse input is written whole, not truncated", async () => {
+  const filler = "x ".repeat(45 * 1024); // ~90KB, well over the pipe buffer
+  const big = `${filler} contact ${EMAIL} done`;
+  const out = await runHook(
+    JSON.stringify({
+      hook_event_name: "preToolUse",
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/big.md", content: big },
+    }),
+  );
+  assert.equal(out.status, 0);
+  // Must be COMPLETE, parseable JSON — the whole point (truncation => parse error).
+  const parsed = JSON.parse(out.stdout) as { permission: string; updated_input: { content: string } };
+  assert.equal(parsed.permission, "allow");
+  const content = parsed.updated_input.content;
+  assert.ok(content.length > 64 * 1024, "the large payload survived the pipe whole");
+  assert.match(content, /\[REDACTED_PII_EMAIL\]/, "the email was tokenized");
+  assert.ok(!content.includes("example.org"), "no raw email in the emitted payload");
+});

@@ -47,7 +47,26 @@ async function readStdin() {
 }
 
 function emit(obj, exitCode = 0) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+  // Write the WHOLE payload SYNCHRONOUSLY, then exit. emit() must stay terminal
+  // (the hook's control flow relies on it not returning), so we can't defer the
+  // exit to an async write callback — that would let execution fall through to a
+  // second emit() and print two JSON objects. But `process.stdout.write()` to a
+  // pipe is asynchronous once the payload exceeds the OS pipe buffer (~64 KB), and
+  // `process.exit()` right after it discards the un-flushed tail — so a large
+  // scrubbed `updated_input` (a big file rewrite that legitimately contained an
+  // email/IP) reached Cursor TRUNCATED and unparseable, failing the tool closed.
+  // fs.writeSync to fd 1 blocks until each chunk lands; loop over partial writes /
+  // EAGAIN (a non-blocking pipe that's momentarily full) so nothing is dropped.
+  const buf = Buffer.from(JSON.stringify(obj) + "\n");
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += fs.writeSync(1, buf, off, buf.length - off);
+    } catch (e) {
+      if (e && e.code === "EAGAIN") continue; // pipe full — retry until the reader drains
+      break; // any other write error: give up rather than spin
+    }
+  }
   process.exit(exitCode);
 }
 
