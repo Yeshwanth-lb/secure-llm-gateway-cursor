@@ -107,6 +107,17 @@ model — exactly the failure we hit on Firefox's Gemini Workspace panel: ChatGP
 send the **raw** text, the tripwire would abort it ("something went wrong"), and no message
 goes through. **This would break on every browser, not just Firefox.**
 
+**CONFIRMED live 2026-07-30:** the composer is `div#prompt-textarea[contenteditable="true"]`
+with literal `class="ProseMirror"` — so this IS ProseMirror, the risk is real.
+
+**BUT check the easy path first.** The same probe also found a `<textarea>` in a form on the
+page (`isPlainTextarea: true`). ProseMirror setups sometimes mirror into a hidden `<textarea>`
+that is what actually gets submitted. **Before doing the synthetic-paste dance, check whether
+ChatGPT's outgoing `/backend-api/conversation` body is sourced from that textarea** — if so,
+writing to it with the native value setter + an `input` event (the existing textarea path in
+`writeText`) is far simpler and more reliable than driving ProseMirror. Only if the request is
+built from the ProseMirror model (not the textarea) do you need the paste approach below.
+
 The reliable way to inject text into ProseMirror is a **synthetic paste**, which ProseMirror
 handles through its own paste pipeline:
 
