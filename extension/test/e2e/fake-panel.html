@@ -1,0 +1,164 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Fake Gemini panel — assistant-response capture (e2e harness)</title>
+<!--
+  Stand-in for the Gemini side panel, used only by run-response.mts. Where
+  fake-gemini.html covers the SEND path, this page covers what happens AFTER the
+  send: how the assistant reply is captured for the traffic log.
+
+  It renders the three panel DOMs Google actually ships (WORKSPACE_COVERAGE §5.6):
+    ?dom=obfuscated  Gmail/Drive shape — rotating class names, reply streamed in
+                     token by token, suggestion chips appended afterwards.
+                     No stable selector exists, so only shape capture can win.
+    ?dom=chips       the same, but the model never replies — only chips arrive.
+                     Nothing trustworthy => the turn must log a BLANK response
+                     (a chip logged as the assistant output is the old bug).
+    ?dom=semantic    the appsElements shape (Docs/Sheets/Slides) — the existing
+                     RESPONSE_SELECTORS must still win, unchanged.
+
+  Deliberately PII-free: the gateway echoes clean text back, which keeps the
+  focus on capture and keeps this fixture readable through the repo's own
+  block-on-PII file hooks.
+-->
+<style>
+  #composer { display: block; width: 480px; min-height: 60px; border: 1px solid #ccc; }
+  .turn { display: block; width: 480px; min-height: 24px; }
+  .chip { display: inline-block; width: 200px; height: 28px; }
+</style>
+
+<div id="feed"></div>
+<div id="composer" class="ql-editor" contenteditable="true" role="textbox" aria-label="Ask Gemini"></div>
+<button aria-label="Send">Send</button>
+
+<script>
+  const RAWFETCH = window.fetch.bind(window);
+  const params = new URLSearchParams(location.search);
+  const BASE = params.get("base");
+  const MODE = params.get("dom") || "obfuscated";
+  const REPLY =
+    "Sure. Here is a summary of the thread you asked about, including the next " +
+    "steps the team agreed on and who owns each of them.";
+
+  window.__sent__ = [];
+  window.__logged__ = []; // { prompt, response, model } as content-main reports it
+  window.__blocked__ = [];
+
+  // bridge -> background -> gateway stand-in.
+  window.addEventListener("gemini-redact:redact-request", async (e) => {
+    const { id, text } = (e && e.detail) || {};
+    let result = { ok: false };
+    try {
+      const r = await RAWFETCH(BASE + "/redact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        result = { ok: true, redacted: j.redacted, piiDetected: j.piiDetected };
+      }
+    } catch {
+      /* fail closed */
+    }
+    window.dispatchEvent(new CustomEvent("gemini-redact:redact-response", { detail: { id, result } }));
+  });
+
+  window.addEventListener("gemini-redact:blocked", (e) => window.__blocked__.push((e.detail || {}).reason));
+  // What the extension would POST to /log-turn.
+  window.addEventListener("gemini-redact:log-turn", (e) => window.__logged__.push(e.detail || {}));
+
+  const feed = document.getElementById("feed");
+
+  /** Per-deploy-rotating class names, as Gmail/Drive/Chat render them. */
+  function obfuscatedClass(seed) {
+    return "x" + seed.toString(36) + "Ab" + ((seed * 7919) % 997).toString(36);
+  }
+
+  function addUserBubble(text) {
+    const row = document.createElement("div");
+    row.className = "turn " + obfuscatedClass(11);
+    const inner = document.createElement("div");
+    inner.className = obfuscatedClass(12);
+    inner.textContent = text;
+    row.appendChild(inner);
+    feed.appendChild(row);
+  }
+
+  /** Stream the reply in, one word at a time, into a rotating-class block. */
+  function streamReply() {
+    const row = document.createElement("div");
+    row.className = "turn " + obfuscatedClass(21);
+    row.setAttribute("role", "listitem");
+    const body = document.createElement("div");
+    body.className = obfuscatedClass(22);
+    row.appendChild(body);
+    feed.appendChild(row);
+    const words = REPLY.split(" ");
+    let i = 0;
+    return new Promise((resolve) => {
+      const t = setInterval(() => {
+        body.textContent = words.slice(0, ++i).join(" ");
+        if (i >= words.length) {
+          clearInterval(t);
+          resolve();
+        }
+      }, 60);
+    });
+  }
+
+  /** Suggestion chips — new, non-streamed, and interactive. The old trap. */
+  function addChips() {
+    const list = document.createElement("div");
+    list.className = "turn " + obfuscatedClass(31);
+    list.setAttribute("role", "list");
+    for (const label of ["Show me my unread emails", "Summarize this thread", "Show fewer suggestions"]) {
+      const item = document.createElement("div");
+      item.className = obfuscatedClass(32);
+      item.setAttribute("role", "listitem");
+      const btn = document.createElement("button");
+      btn.className = "chip " + obfuscatedClass(33);
+      btn.textContent = label;
+      item.appendChild(btn);
+      list.appendChild(item);
+    }
+    feed.appendChild(list);
+  }
+
+  function addSemanticReply() {
+    const row = document.createElement("div");
+    row.className = "turn appsElementsSidekickAgentMessageRoot";
+    const body = document.createElement("div");
+    body.className = "appsElementsSidekickAgentMessageBubbleContent";
+    body.textContent = REPLY;
+    row.appendChild(body);
+    feed.appendChild(row);
+  }
+
+  // The page's OWN send path: it sees whatever text content-main left in the
+  // composer, echoes the user bubble, then plays out the chosen panel DOM.
+  async function doSend() {
+    const box = document.getElementById("composer");
+    const text = box.textContent;
+    if (!text.trim()) return;
+    window.__sent__.push(text);
+    box.textContent = "";
+    addUserBubble(text);
+    if (MODE === "semantic") {
+      setTimeout(addSemanticReply, 120);
+      return;
+    }
+    if (MODE === "chips") {
+      setTimeout(addChips, 200);
+      return;
+    }
+    await streamReply();
+    addChips(); // chips land AFTER the reply, exactly as Gmail does it
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) doSend();
+  });
+  document.querySelector('button[aria-label="Send"]').addEventListener("click", () => doSend());
+</script>
+
+<script type="module" src="/src/content-main.js"></script>

@@ -66,17 +66,19 @@ model-sync bug once showed a token in the DOM while sending raw).
 
 | Surface | Host | Prompt redaction | Response capture | Notes |
 |---|---|:---:|:---:|---|
-| Gemini web | gemini.google.com | ✅ wire-proven | ✅ | Quill composer; original surface |
-| Gmail | mail.google.com | ✅ wire-proven | ❌ (none) | obfuscated reply DOM |
-| Docs | docs.google.com | ✅ wire-proven | ✅ | appsElements (semantic) |
-| Sheets | docs.google.com | ✅ wire-proven | ✅ | appsElements |
-| Slides | docs.google.com | ✅ verified | ✅ | appsElements |
-| Drive | drive.google.com | ✅ verified | ❌ (none) | obfuscated reply DOM (same as Gmail) |
-| Chat | chat.google.com | ✅ wire-proven | ❌ (none) | different obfuscated DOM |
+| Gemini web | gemini.google.com | ✅ wire-proven | ✅ selectors | Quill composer; original surface |
+| Gmail | mail.google.com | ✅ wire-proven | 🟡 shape (§5.7) | obfuscated reply DOM — no stable selector |
+| Docs | docs.google.com | ✅ wire-proven | ✅ selectors (+ shape fallback) | appsElements (semantic) |
+| Sheets | docs.google.com | ✅ wire-proven | ✅ selectors (+ shape fallback) | appsElements |
+| Slides | docs.google.com | ✅ verified | ✅ selectors (+ shape fallback) | appsElements |
+| Drive | drive.google.com | ✅ verified | 🟡 shape (§5.7) | obfuscated reply DOM (same build as Gmail) |
+| Chat | chat.google.com | ✅ wire-proven | 🟡 shape (§5.7) | different obfuscated DOM |
 | Claude Code | (gateway, not extension) | ✅ wire-proven | ✅ | network hop, separate mechanism |
 
 **Prompt redaction (the security control) works on all seven browser surfaces.**
-Response capture is a cosmetic inspector view (see §6).
+Response capture is a cosmetic inspector view (see §6). 🟡 = captured by the
+selector-free shape pass added 2026-07-29 (§5.7); it is best-effort and still
+logs a BLANK reply rather than guess, so confirm per surface in the Inspector.
 
 ---
 
@@ -138,8 +140,33 @@ worthless. A role-based fallback (`last [role="listitem"]`) was tried and
 **reverted** — it reliably grabbed a **suggestion chip** ("Show me my unread
 emails") instead of the reply, i.e. logged the wrong text as the assistant output.
 **A wrong pairing in an audit log is worse than a blank one**, so on obfuscated
-surfaces we log the prompt (redacted) and leave the response empty rather than
-guess.
+surfaces we logged the prompt (redacted) and left the response empty rather than
+guess. §5.7 replaces that stalemate with a signal that can tell a reply from a
+chip.
+
+### 5.7 Selector-free reply capture (2026-07-29)
+Gmail, Drive and Chat showed "(none)" for the assistant output while Gemini web,
+Docs, Sheets and Slides showed it, purely because the first group has no stable
+class to select. Fixed without inventing selectors, by anchoring on the one thing
+we always know — **the text we just submitted**:
+
+- `response-capture.js` finds the **deepest** element containing the submitted
+  text (the user's own bubble; depth matters — on a first turn the whole
+  conversation container holds exactly the prompt too, and anchoring there hides
+  the reply inside the anchor), bounds the search to its nearest ancestor that
+  holds more than the prompt, and tracks the blocks that **follow** it.
+- `response-finder.js` (pure, unit-tested) ranks those blocks. What separates a
+  reply from a chip is not a class name but behavior: a reply **streams** (its
+  text grows across samples) and is **not interactive**; chips are inserted fully
+  formed and are buttons. Blocks that precede the user's message are excluded
+  outright, which is what makes prompt↔reply mispairing impossible.
+- The old rule is preserved as the tie-breaker: when nothing clears the
+  confidence bar, the turn logs a **blank** response. Semantic selectors still
+  run first, so the four surfaces that already worked are untouched.
+
+Coverage: `tests/phase-gemini-response.test.ts` (scorer + the DOM walk against a
+minimal DOM shim, both anchor strategies) and
+`extension/test/e2e/run-response.mts` (real Chromium, all three panel shapes).
 
 ---
 
@@ -147,9 +174,10 @@ guess.
 
 - **One-way redaction.** The prompt is scrubbed outbound; responses are not
   rewritten. Fixed tokens, no restore.
-- **Response capture is cosmetic**, not a security function. It shows in the
-  inspector only where Google's DOM is stable (the 4 appsElements surfaces); blank
-  elsewhere. What is captured is stored **redacted** by the gateway anyway.
+- **Response capture is cosmetic**, not a security function. Semantic selectors
+  cover the 4 appsElements surfaces; the shape pass (§5.7) covers the obfuscated
+  ones best-effort and deliberately stays blank when unsure. What is captured is
+  stored **redacted** by the gateway anyway.
 - **Gemini reading your own Workspace data server-side is NOT interceptable.** When
   you ask "summarize my inbox," Gemini reads Gmail on Google's servers and returns
   content — that data never passes through the composer we intercept. No browser

@@ -18,6 +18,7 @@
     "stdio": "node dist/secure-llm-gateway.js --stdio",
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
     "test:gemini-e2e": "node --experimental-strip-types extension/test/e2e/run.mts",
+    "test:gemini-response-e2e": "node --experimental-strip-types extension/test/e2e/run-response.mts",
     "watch:selectors": "node scripts/selector-watch.mjs",
     "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs"
   },

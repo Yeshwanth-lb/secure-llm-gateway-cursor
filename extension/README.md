@@ -49,6 +49,8 @@ the prompt leaves the browser.
 | `src/composer.js` | MAIN | DOM glue: find composer (exact-selector fast-path → **heuristic self-heal** fallback), read text, write via native setter + `input` event, health check. |
 | `src/composer-finder.js` | MAIN (pure) | **Unit-tested** Layer-1 scorer: ranks candidate editable boxes by shape (size, prompt-like label, near-send) so `findComposer` survives most Google DOM changes and rejects decoys (Sheets empty `role=textbox`). No DOM access. |
 | `src/composer-learn.js` | MAIN (pure) | **Unit-tested** Layer-1.5 chooser: focus > learned fingerprint > heuristic. Turns "the box the user submits from" into ground truth; persists a PII-free fingerprint (via bridge → `chrome.storage.local`) to recall the composer after a redesign. No DOM access. |
+| `src/response-capture.js` | MAIN | DOM glue for capturing the assistant reply on panels with **no stable selectors** (Gmail/Drive/Chat rotate class names every deploy). Anchors on the text just submitted and walks forward; feeds `response-finder.js`. Read-only — cannot affect whether a send is blocked. |
+| `src/response-finder.js` | MAIN (pure) | **Unit-tested** reply scorer: ranks blocks after the user's message by shape (streamed growth, appeared-with-this-turn, non-interactive) and returns "nothing" rather than risk logging a suggestion chip. No DOM access. |
 | `src/redact-client.js` | MAIN | `fetch` wrapper to the local gateway `/redact`. |
 | `src/tripwire.js` | MAIN | Secondary net (**ON by default**): aborts an outgoing request to Gemini's generate endpoint whose body still contains raw PII (Luhn-checked, endpoint-scoped). DOM-independent — survives Gemini UI changes. Backup to the DOM path. |
 
@@ -97,15 +99,20 @@ Headless (run from repo root, part of the normal suite):
 ```
 node --experimental-strip-types --test tests/phase-gemini.test.ts       # Stage 1: gateway /redact contract
 node --experimental-strip-types --test tests/phase-gemini-core.test.ts   # loop guard, fail-closed, tripwire predicate
+node --experimental-strip-types --test tests/phase-gemini-response.test.ts  # assistant-reply capture (scorer + DOM walk)
 ```
 
-Both are included in `npm test`.
+All three are included in `npm test`. The response tests drive the real DOM walk
+against a minimal DOM shim, so selector-free reply capture is covered without a
+browser.
 
 Browser e2e (Playwright, dev-only dep; drives the real `content-main.js` in
-headless Chromium against a fake Gemini page + the real gateway):
+headless Chromium against a fake Gemini page + the real gateway). Needs the
+browser binary once: `npx playwright install chromium`.
 
 ```
-npm run test:gemini-e2e
+npm run test:gemini-e2e            # send path: intercept, redact, re-fire
+npm run test:gemini-response-e2e   # reply capture across the three panel DOMs
 ```
 
 Proves the Stage-3 mechanics (intercept kills original, redacted text
