@@ -242,6 +242,27 @@ export function findSendButton(root = document) {
   );
 }
 
+/**
+ * Is Gemini still generating a reply RIGHT NOW? While streaming or "thinking"
+ * (incl. deep-research "Collecting info…") it shows a VISIBLE stop control and
+ * removes it once the answer is final. Capture uses this to avoid settling on an
+ * intermediate state and logging it as the reply. Matches a visible button whose
+ * aria-label / tooltip mentions "Stop" (localized labels say "Stop response" /
+ * "Stop generating"; dialog buttons say "Cancel"/"Close", which we deliberately
+ * do NOT match, to avoid false positives from unrelated toolbars).
+ */
+export function isGenerating(root = document) {
+  const btns = root.querySelectorAll(
+    'button[aria-label*="Stop" i], button[mattooltip*="Stop" i], [role="button"][aria-label*="Stop" i]',
+  );
+  for (const b of btns) {
+    if (b.offsetParent !== null || (typeof b.getClientRects === "function" && b.getClientRects().length > 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Candidate selectors for the model-name label in Gemini's header (e.g.
 // "Flash", "Pro"). Tunable against the live site.
 const MODEL_SELECTORS = [

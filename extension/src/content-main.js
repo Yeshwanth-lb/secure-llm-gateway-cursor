@@ -9,7 +9,7 @@
 // unit-tested) — this file is the DOM/event glue around that core.
 
 import { createInterceptor, decideSubmission } from "./interceptor-core.js";
-import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer } from "./composer.js";
+import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer, isGenerating } from "./composer.js";
 import { createResponseCapture } from "./response-capture.js";
 import { installTripwire } from "./tripwire.js";
 
@@ -61,7 +61,11 @@ let CONFIG = {
   tripwire: true,
   debug: false,
   settleMs: 2500,
-  turnTimeoutMs: 30000,
+  // Backstop only: we now wait for generation to actually FINISH (isGenerating +
+  // placeholder gating) rather than a fixed quiet window, so this just caps a
+  // reply that never settles. Generous enough for deep-research/"Collecting info…"
+  // turns that legitimately run a while before the answer appears.
+  turnTimeoutMs: 120000,
 };
 // With `all_frames: true` the content script also loads inside the Google
 // Workspace Gemini panel, which Gmail/Drive render in a CROSS-ORIGIN
@@ -238,31 +242,52 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
   const sent = norm(sentText || rawPrompt);
 
-  // Read THIS turn's assistant reply via the semantic selectors, robustly:
-  //   - the LAST NON-EMPTY matching node (readLatestResponse skips trailing
-  //     empty placeholders), and
-  //   - NEVER the user's OWN message bubble: on some surfaces the user's message
-  //     matches the same selector, and logging it back as the "answer" (or
-  //     settling on it before the model replies) was a top cause of the flaky
-  //     "(none)". Exclude a node whose text is just our submitted prompt.
+  // A reply is still a LOADING PLACEHOLDER (not the answer) when it's empty, a
+  // bare status label, or a short "Collecting info…/Thinking…" line Gemini shows
+  // BEFORE the answer. Settling on one of these logged the placeholder and missed
+  // the real reply that arrived later (deep-research / slow turns).
+  const LOADING_RE =
+    /\b(collecting info|thinking|working on it|searching|analy[sz]ing|generating|reasoning|hold on|just a (?:sec|moment)|let me (?:think|check))\b/i;
+  const isPlaceholder = (t) => {
+    const n = norm(t);
+    if (!n) return true;
+    if (/^(gemini response|model thoughts|show thinking)$/i.test(n)) return true;
+    const body = n.replace(/^(gemini response|model thoughts|show thinking)\s*/i, "");
+    return LOADING_RE.test(body) && body.length < 60;
+  };
+  // Drop the leading status label from the text we actually store.
+  const clean = (t) => norm(t).replace(/^(gemini response|show thinking|model thoughts)\s*/i, "");
+
+  const shape = createResponseCapture(sentText || rawPrompt, document, composer);
+
+  // Read THIS turn's reply: the LAST NON-EMPTY selector node whose text isn't our
+  // own submitted prompt (never log the user's bubble). "" if none.
   const readReply = () => {
     const t = readLatestResponse();
     if (!t) return "";
     return norm(t) === sent ? "" : t;
   };
-
-  // Snapshot the PREVIOUS reply (if any) so we can tell this turn's reply apart.
-  const baselineReply = readReply();
-  // A new reply exists once the reader returns non-empty text DIFFERENT from the
-  // pre-send snapshot. TEXT-based, not node-count-based: the old count test went
-  // true the instant the user's own bubble was appended, so on a slow reply the
-  // 2.5s settle fired before the model answered and we logged empty. Driving off
-  // the (prompt-excluded) reply text means only a real model reply trips it.
-  const hasNewReply = () => {
-    const t = readReply();
+  // Best available reply text (selectors first, else shape), placeholders excluded.
+  const replyText = () => {
+    const s = readReply();
+    if (s && !isPlaceholder(s)) return s;
+    if (shape.hasCandidate()) {
+      const r = shape.read();
+      if (r && !isPlaceholder(r)) return r;
+    }
+    return "";
+  };
+  // Snapshot the PREVIOUS reply so we can tell this turn's reply apart.
+  const baselineReply = replyText();
+  // Ready to LOG only once the model has STOPPED generating (no visible Stop
+  // control) AND a real, non-placeholder reply is present that differs from the
+  // pre-send snapshot. Gating on isGenerating() is what stops us settling on an
+  // intermediate "Collecting info…" while the answer is still being produced.
+  const replyReady = () => {
+    if (isGenerating()) return false;
+    const t = replyText();
     return t !== "" && t !== baselineReply;
   };
-  const shape = createResponseCapture(sentText || rawPrompt, document, composer);
   let settleTimer = null;
   let done = false;
   const finish = () => {
@@ -274,16 +299,10 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
       /* ignore */
     }
     clearTimeout(hardTimeout);
-    // Selector path first (covers gemini.google.com + the Docs/Sheets/Slides
-    // panel), no min-length floor so short replies survive. ALWAYS fall back to
-    // shape capture when the selector read is empty — the old code logged "" when
-    // the selector path was "new" but momentarily read empty, never trying shape.
-    const sel = hasNewReply() ? readReply() : "";
-    const response = sel || shape.read();
+    const response = clean(replyText());
     if (CONFIG.debug) {
       console.info(
-        "[gemini-redact] turn captured via",
-        sel ? "selectors" : response ? "shape" : "nothing",
+        "[gemini-redact] turn captured, generating=" + isGenerating(),
         "responseLen=" + response.length,
       );
     }
@@ -291,21 +310,19 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
       new CustomEvent("gemini-redact:log-turn", { detail: { prompt: rawPrompt, response, model } }),
     );
   };
-  // Start the "settled" countdown only once the reply is visible to EITHER path;
-  // reset it on every subsequent mutation (streaming). Quiet for 2.5s after that
-  // ⇒ reply finished.
+  // Arm the 2.5s "settled" countdown ONLY once a real reply is READY (generation
+  // finished + non-placeholder). While Gemini is still generating or showing a
+  // placeholder, cancel any pending settle and keep waiting; the hard timeout is
+  // the backstop for a reply that never settles.
   const obs = new MutationObserver(() => {
-    // Selector path first (new bubble or changed text); it covers gemini.google.com
-    // AND the Workspace panel, so we only walk the DOM by shape when it has nothing.
-    if (hasNewReply()) {
+    shape.sample();
+    if (replyReady()) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(finish, CONFIG.settleMs);
-      return;
+    } else if (settleTimer) {
+      clearTimeout(settleTimer);
+      settleTimer = null;
     }
-    shape.sample();
-    if (!shape.hasCandidate()) return; // reply not rendered yet
-    clearTimeout(settleTimer);
-    settleTimer = setTimeout(finish, CONFIG.settleMs);
   });
   try {
     obs.observe(document.body, { childList: true, subtree: true, characterData: true });
