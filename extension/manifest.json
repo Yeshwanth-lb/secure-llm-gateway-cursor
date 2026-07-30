@@ -19,7 +19,7 @@
         "https://drive.google.com/*",
         "https://chat.google.com/*"
       ],
-      "js": ["src/content-bridge.js", "src/loader.js"],
+      "js": ["src/browser-api.js", "src/content-bridge.js", "src/loader.js"],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": true

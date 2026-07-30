@@ -40,10 +40,11 @@ the prompt leaves the browser.
 
 | File | World | Role |
 |------|-------|------|
-| `manifest.json` | — | MV3 manifest, scoped to `gemini.google.com`, loopback host permission only. |
-| `src/loader.js` | isolated | Injects the MAIN-world ES module (MV3 content scripts can't `import`). |
-| `src/background.js` | service worker | The **only** component that fetches the gateway. Page-world fetch to `127.0.0.1` is CORS-blocked (gateway grants CORS to loopback origins only); the SW has `host_permissions` and is not subject to page CORS. |
-| `src/content-bridge.js` | isolated | Relays config (`base`, `enabled`) from `chrome.storage` (managed > local) into MAIN, and relays redact requests MAIN→SW→MAIN. No PII crosses to Google — only browser↔loopback. |
+| `manifest.json` | — | MV3 manifest (Chrome), scoped to `gemini.google.com` + Workspace hosts, loopback host permission only. Firefox/Safari variants are generated — see [Other browsers](#other-browsers-firefox--safari). |
+| `src/browser-api.js` | isolated + background | Extension-namespace shim. Publishes `globalThis.geminiRedactBrowserApi` = `{ api, storageGet, storageSet, sendMessage }`, resolving **`chrome` before `browser`** (see [Other browsers](#other-browsers-firefox--safari)). |
+| `src/loader.js` | isolated | Injects the MAIN-world ES module (MV3 content scripts can't `import`). Escalates a failed/CSP-refused load as `blocked`. |
+| `src/background.js` | service worker (Chrome) / event page (Firefox, Safari) | The **only** component that fetches the gateway. Page-world fetch to `127.0.0.1` is CORS-blocked (gateway grants CORS to loopback + extension origins only); the background has `host_permissions` and is not subject to page CORS. |
+| `src/content-bridge.js` | isolated | Relays config (`base`, `enabled`) from extension storage (managed > local) into MAIN, and relays redact requests MAIN→background→MAIN. No PII crosses to Google — only browser↔loopback. |
 | `src/content-main.js` | MAIN | The Stage 3 core: capture-phase intercept on `document`, kill → redact → re-fire. |
 | `src/interceptor-core.js` | MAIN (pure) | **Unit-tested** control logic: loop guard, synthetic-event recognition, fail-closed decision. |
 | `src/composer.js` | MAIN | DOM glue: find composer (exact-selector fast-path → **heuristic self-heal** fallback), read text, write via native setter + `input` event, health check. |
@@ -67,6 +68,116 @@ validated against the **live** Gemini page (Stages 2/3/5 below).
    → select this `extension/` folder.
 3. Open `https://gemini.google.com`. Open DevTools console; you should see
    `[gemini-redact] content script active (MAIN world)`.
+
+## Other browsers (Firefox + Safari)
+
+Same code, same security model — only the manifest and the four
+extension-API files differ. `extension/` itself stays the **Chrome** package;
+per-browser packages are generated into `extension/build/` (gitignored):
+
+```
+npm run ext:build            # both
+npm run ext:build:firefox    # -> extension/build/firefox
+npm run ext:build:safari     # -> extension/build/safari
+```
+
+`extension/manifest.json` is the single source of truth for hosts, permissions
+and web-accessible resources; `scripts/build-extension.mjs` copies `src/` and
+patches only the keys that must differ. Port details and rationale:
+[`CROSS_BROWSER_PORT.md`](CROSS_BROWSER_PORT.md).
+
+**The shim resolves `chrome` first, `browser` second — do not flip it.** Firefox
+and Safari expose both namespaces, but `browser.*` is promise-only: it rejects
+the trailing callback this extension passes everywhere, and
+`browser.runtime.onMessage` ignores `return true` for a deferred `sendResponse`.
+Under `chrome.*` both engines support the callback style, so the existing code
+runs unchanged. (`storageGet`/`sendMessage` still tolerate a promise-only
+namespace, so an engine shipping `browser` alone also works.) A regression here
+fails **closed** — every send blocked — which is safe but unusable;
+`tests/phase-cross-browser.test.ts` locks the order in.
+
+### Firefox — verified working
+
+```
+npm run ext:build:firefox
+npm run test:firefox-e2e     # real Firefox, real extension, real gateway (12 checks)
+npm run probe:firefox-csp    # is the MAIN module allowed to run on live gemini.google.com?
+```
+
+To load it by hand: `about:debugging#/runtime/this-firefox` → **Load Temporary
+Add-on** → pick `extension/build/firefox/manifest.json`. Firefox MV3 treats host
+permissions as opt-in, so if gateway calls fail, grant them in `about:addons` →
+the extension → **Permissions** → *Access your data for 127.0.0.1*.
+
+`test:firefox-e2e` needs no extra dependency: it installs the add-on over
+Firefox's remote debugging protocol (`firefox-rdp.mts` — the one thing `web-ext`
+is normally needed for) and types with **trusted** keystrokes over Marionette
+(`firefox-marionette.mts`), because the loop guard deliberately ignores
+`isTrusted:false` events. It serves the fake composer under a CSP copied from
+gemini.google.com (nonce + `strict-dynamic`).
+
+Firefox-specific behavior worth knowing:
+
+- **No MV3 background service worker** (Firefox bug 1573659). The generated
+  manifest uses `background.scripts` + `type: "module"` (an event page). Verified:
+  Firefox 153 loads it with **zero manifest warnings** and reports the background
+  `RUNNING`.
+- **Cross-world objects need cloning.** Gecko isolates the content-script
+  compartment from the page's, so a `CustomEvent` `detail` created in
+  `content-bridge.js` is opaque to MAIN world — reading a property throws
+  *"Permission denied to access property"*. The bridge hands data over with
+  `cloneInto(detail, window)` (Gecko-only, capability-tested so Chrome/Safari are
+  unaffected). Without it MAIN never reads the redaction result, times out, and
+  blocks every send.
+- **The page CSP does not stop the MAIN-world injection.** Gecko applies a page's
+  CSP to script tags a content script inserts (bugs 1267027 / 1591983), and
+  Gemini serves `script-src 'nonce-…' 'strict-dynamic'`, so this was the port's
+  biggest risk — a refused load means no interceptor *and* no tripwire, i.e. a
+  silent leak. Checked against the real page (`npm run probe:firefox-csp`, no
+  Google account needed): the module loads and the tripwire installs. `loader.js`
+  now also raises `blocked` if the load ever *is* refused.
+
+### Safari — packaged, **not verified here**
+
+The Safari package is generated by `npm run ext:build:safari`, but it could not
+be built or run in this environment: `xcrun safari-web-extension-converter`
+ships only with **full Xcode**, and only the Command Line Tools are installed.
+So the steps below are unverified, and the loopback question in particular is
+open.
+
+```
+npm run ext:build:safari
+xcrun safari-web-extension-converter extension/build/safari      # needs full Xcode
+```
+
+Then in the generated Xcode project, before anything will reach the gateway:
+
+1. **Extension target → Signing & Capabilities → App Sandbox → Network →
+   Outgoing Connections (Client)** (`com.apple.security.network.client`). A
+   sandboxed extension cannot open *any* socket without it, loopback included.
+2. Safari → Settings → Extensions → enable it, and allow it on
+   `gemini.google.com` (and the Workspace hosts).
+3. macOS ≥ 15 gates local-network access per app: **System Settings → Privacy &
+   Security → Local Network → Safari** must be on.
+
+Known Safari specifics already handled in the port:
+
+- **Event page, never a service worker.** Safari's MV3 background *service
+  worker* enforces CORS on extension fetches (Apple DTS thread 654839), which
+  would break the loopback call; from a background **script** Safari skips CORS
+  for hosts in `host_permissions`. The Safari manifest therefore declares only
+  `background.scripts`, so Safari cannot pick the broken environment.
+- **Rotating extension origin.** Safari changes the
+  `safari-web-extension://<GUID>` origin on every launch. The gateway matches the
+  *scheme*, not a fixed id (`src/server.ts` `isExtensionOrigin`), so no gateway
+  change is needed.
+- **No `storage.managed`.** The shim resolves a missing area to `{}`, so config
+  degrades to `storage.local` instead of throwing.
+
+Do **not** work around a Safari block by moving the gateway fetch into the page
+(that reintroduces the CORS block the background exists to avoid) or by
+weakening fail-closed. If Safari refuses the loopback fetch, the extension blocks
+sends — no silent leak — and that is the honest outcome to report.
 
 ## Manual verification (browser-gated stages)
 
@@ -100,9 +211,10 @@ Headless (run from repo root, part of the normal suite):
 node --experimental-strip-types --test tests/phase-gemini.test.ts       # Stage 1: gateway /redact contract
 node --experimental-strip-types --test tests/phase-gemini-core.test.ts   # loop guard, fail-closed, tripwire predicate
 node --experimental-strip-types --test tests/phase-gemini-response.test.ts  # assistant-reply capture (scorer + DOM walk)
+node --experimental-strip-types --test tests/phase-cross-browser.test.ts    # API-shim order + generated Firefox/Safari manifests
 ```
 
-All three are included in `npm test`. The response tests drive the real DOM walk
+All of these are included in `npm test`. The response tests drive the real DOM walk
 against a minimal DOM shim, so selector-free reply capture is covered without a
 browser.
 

@@ -19,6 +19,11 @@
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
     "test:gemini-e2e": "node --experimental-strip-types extension/test/e2e/run.mts",
     "test:gemini-response-e2e": "node --experimental-strip-types extension/test/e2e/run-response.mts",
+    "test:firefox-e2e": "node --experimental-strip-types extension/test/e2e/run-firefox.mts",
+    "probe:firefox-csp": "node --experimental-strip-types extension/test/e2e/probe-firefox-csp.mts",
+    "ext:build": "node scripts/build-extension.mjs",
+    "ext:build:firefox": "node scripts/build-extension.mjs firefox",
+    "ext:build:safari": "node scripts/build-extension.mjs safari",
     "watch:selectors": "node scripts/selector-watch.mjs",
     "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs"
   },

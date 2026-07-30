@@ -6,18 +6,27 @@
 // however, has `host_permissions` for http://127.0.0.1:8001/* and its fetch is
 // extension-privileged (not subject to page CORS). So ALL gateway calls funnel
 // here, reached from the page via: MAIN -> CustomEvent -> bridge ->
-// chrome.runtime.sendMessage -> here.
+// api.runtime.sendMessage -> here.
+//
+// Runs as an MV3 service worker on Chrome and as a non-persistent event page on
+// Firefox/Safari (neither supports `background.service_worker` — the manifests
+// declare both keys). Nothing here depends on which one it is: the listener is
+// registered at the top level, and config is re-read from storage rather than
+// held across an unload.
 //
 // Design ref: scripts/gemini_imp.md §4 (revised — fetch moved off the page).
 
+import "./browser-api.js";
 import { redact, logTurn } from "./redact-client.js";
+
+const { api, storageGet } = globalThis.geminiRedactBrowserApi;
 
 let CONFIG = { base: "http://127.0.0.1:8001" };
 
 function loadConfig() {
-  if (!(globalThis.chrome && chrome.storage)) return;
-  const areas = [chrome.storage.managed, chrome.storage.local].filter(Boolean);
-  Promise.all(areas.map((a) => new Promise((res) => a.get(["base"], (v) => res(v || {}))))).then(
+  const store = (api && api.storage) || null;
+  if (!store) return;
+  Promise.all([storageGet(store.managed, ["base"]), storageGet(store.local, ["base"])]).then(
     ([managed, local]) => {
       const base = (managed && managed.base) || (local && local.base) || CONFIG.base;
       CONFIG = { base };
@@ -25,11 +34,11 @@ function loadConfig() {
   );
 }
 loadConfig();
-if (globalThis.chrome && chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener(loadConfig);
+if (api && api.storage && api.storage.onChanged) {
+  api.storage.onChanged.addListener(loadConfig);
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "redact" && typeof msg.text === "string") {
     // redact() never throws; resolves {ok:false} on any failure (fail-closed).
     redact(msg.text, { base: CONFIG.base }).then(sendResponse);

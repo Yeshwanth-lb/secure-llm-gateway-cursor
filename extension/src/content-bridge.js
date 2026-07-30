@@ -1,11 +1,29 @@
 // ===== CONTENT SCRIPT (ISOLATED world) — config bridge =====================
 // The MAIN-world script (content-main.js) can see the page but NOT extension
-// APIs (chrome.storage). This isolated-world script has the opposite access, so
+// APIs (api.storage). This isolated-world script has the opposite access, so
 // it relays configuration (gateway URL, enabled toggle) into MAIN world via a
 // DOM CustomEvent. No PII and no token map ever cross this bridge — there is no
 // map in this design (rev.2), and prompt text never leaves the MAIN world.
 //
+// `api` is the Chrome/Firefox/Safari extension namespace resolved by
+// browser-api.js, which the manifest lists immediately before this file.
+//
 // Design ref: scripts/gemini_imp.md §4.2.
+
+const { api, storageGet, storageSet, sendMessage } = globalThis.geminiRedactBrowserApi;
+
+/**
+ * Hand a plain object to MAIN-world JS.
+ *
+ * Firefox keeps the content-script compartment separate from the page's, so an
+ * object created HERE is opaque to the page — reading a property throws
+ * "Permission denied to access property". Chrome and Safari share objects across
+ * worlds directly. Without this, content-main.js could not read the redaction
+ * result: it would time out and fail closed, blocking every send on Firefox.
+ * `cloneInto` is Gecko-only, hence the capability test rather than a UA check.
+ */
+const toPageDetail =
+  typeof cloneInto === "function" ? (detail) => cloneInto(detail, window) : (detail) => detail;
 
 // `tripwire`/`tripwireEndpoints` are omitted here so they fall back to the
 // MAIN-world defaults (tripwire ON, built-in endpoint list) unless managed/local
@@ -13,26 +31,45 @@
 const DEFAULTS = { base: "http://127.0.0.1:8001", enabled: true };
 const CONFIG_KEYS = ["base", "enabled", "tripwire", "tripwireEndpoints", "debug"];
 
-function push(cfg) {
-  window.dispatchEvent(new CustomEvent("gemini-redact:config", { detail: cfg }));
+// Startup race: MAIN world arrives as an async `<script type="module">` load
+// (loader.js) while the config below arrives from an async storage read. If the
+// storage read wins, the only config event is dispatched before content-main.js
+// has registered its listener and MAIN keeps its defaults — which also means
+// `applyTripwire()` never runs, silently leaving the fail-closed tripwire OFF.
+// Observed on Firefox, but it is a race on every browser. Re-publishing a few
+// times closes it; the MAIN-side handler merges config and arms the tripwire
+// idempotently, so extra events are harmless.
+const REPUBLISH_DELAYS_MS = [0, 100, 500, 1500];
+
+/** Dispatch one MAIN-world event now. */
+function emit(name, detail) {
+  window.dispatchEvent(new CustomEvent(name, { detail: toPageDetail(detail) }));
 }
 
-// chrome.storage.managed carries enterprise-pushed config (Stage 6); local is
-// the user/dev fallback. Managed wins when present.
+/** Dispatch a state event repeatedly so a late MAIN world still receives it. */
+function publish(name, detail) {
+  for (const delay of REPUBLISH_DELAYS_MS) {
+    if (delay === 0) emit(name, detail);
+    else setTimeout(() => emit(name, detail), delay);
+  }
+}
+
+// storage.managed carries enterprise-pushed config (Stage 6); local is the
+// user/dev fallback. Managed wins when present. Safari has no `managed` area —
+// storageGet resolves {} for a missing area, so it degrades to local.
 function load() {
-  const store = (globalThis.chrome && chrome.storage) || null;
+  const store = (api && api.storage) || null;
   if (!store) {
-    push(DEFAULTS);
+    publish("gemini-redact:config", DEFAULTS);
     return;
   }
-  const areas = [store.managed, store.local].filter(Boolean);
-  Promise.all(
-    areas.map((a) => new Promise((res) => a.get(CONFIG_KEYS, (v) => res(v || {})))),
-  ).then((results) => {
-    // Later (local) overrides earlier (managed) ONLY for keys managed didn't set.
-    const merged = Object.assign({}, DEFAULTS, results[1] || {}, stripUndefined(results[0] || {}));
-    push(merged);
-  });
+  Promise.all([storageGet(store.managed, CONFIG_KEYS), storageGet(store.local, CONFIG_KEYS)]).then(
+    ([managed, local]) => {
+      // Later (local) overrides earlier (managed) ONLY for keys managed didn't set.
+      const merged = Object.assign({}, DEFAULTS, local || {}, stripUndefined(managed || {}));
+      publish("gemini-redact:config", merged);
+    },
+  );
 }
 
 function stripUndefined(o) {
@@ -41,82 +78,59 @@ function stripUndefined(o) {
   return out;
 }
 
-// Relay redaction requests from MAIN world to the background service worker
-// (the only place a gateway fetch is allowed — see background.js). MAIN cannot
-// call chrome.runtime; this isolated world can.
+// Relay redaction requests from MAIN world to the background (the only place a
+// gateway fetch is allowed — see background.js). MAIN cannot call api.runtime;
+// this isolated world can.
 window.addEventListener("gemini-redact:redact-request", (e) => {
   const detail = (e && e.detail) || {};
   const { id, text } = detail;
-  const respond = (result) =>
-    window.dispatchEvent(
-      new CustomEvent("gemini-redact:redact-response", { detail: { id, result: result || { ok: false } } }),
-    );
-  if (!(globalThis.chrome && chrome.runtime && chrome.runtime.sendMessage)) {
-    respond({ ok: false }); // no extension messaging -> fail closed
-    return;
-  }
-  try {
-    chrome.runtime.sendMessage({ type: "redact", text }, (result) => {
-      // chrome.runtime.lastError (dead worker) -> undefined result -> fail closed.
-      respond(result);
-    });
-  } catch {
-    respond({ ok: false });
-  }
+  // One-shot and correlated by id, so unlike config this must not be republished.
+  const respond = (result) => emit("gemini-redact:redact-response", { id, result: result || { ok: false } });
+  // sendMessage resolves undefined when there is no receiver (dead worker) or
+  // messaging is unavailable -> respond({ok:false}) -> caller fails closed.
+  sendMessage({ type: "redact", text }).then(respond, () => respond({ ok: false }));
 });
 
 // Relay per-turn chat logging (redacted prompt + response) MAIN -> background.
 // Fire-and-forget: MAIN doesn't await a response.
 window.addEventListener("gemini-redact:log-turn", (e) => {
   const turn = (e && e.detail) || {};
-  if (!(globalThis.chrome && chrome.runtime && chrome.runtime.sendMessage)) return;
-  try {
-    chrome.runtime.sendMessage({ type: "logTurn", turn }, () => void chrome.runtime.lastError);
-  } catch {
+  sendMessage({ type: "logTurn", turn }).catch(() => {
     /* no receiver — non-fatal */
-  }
+  });
 });
 
 // LAYER 1.5 — persist/restore the learned composer fingerprint. MAIN world
-// learns it (from a focused submit) but can't touch chrome.storage; this
+// learns it (from a focused submit) but can't touch extension storage; this
 // isolated world saves it and pushes the saved one back on load. A fingerprint
 // is shape metadata only (tag/role/aria-label/class names) — never PII.
+// Republished for the same startup-race reason as the config event: a learned
+// fingerprint that MAIN misses costs the Layer-1.5 composer recall.
 function pushLearned(fp) {
-  window.dispatchEvent(new CustomEvent("gemini-redact:learned-composer", { detail: { fingerprint: fp || null } }));
+  publish("gemini-redact:learned-composer", { fingerprint: fp || null });
 }
 function loadLearned() {
-  const store = (globalThis.chrome && chrome.storage && chrome.storage.local) || null;
-  if (!store) return;
-  try {
-    store.get(["learnedComposer"], (v) => pushLearned((v && v.learnedComposer) || null));
-  } catch {
-    /* non-fatal */
-  }
+  const local = (api && api.storage && api.storage.local) || null;
+  if (!local) return;
+  storageGet(local, ["learnedComposer"]).then((v) => pushLearned((v && v.learnedComposer) || null));
 }
 window.addEventListener("gemini-redact:learn-composer", (e) => {
   const fp = (e && e.detail && e.detail.fingerprint) || null;
-  const store = (globalThis.chrome && chrome.storage && chrome.storage.local) || null;
-  if (!fp || !store) return;
-  try {
-    store.set({ learnedComposer: fp });
-  } catch {
-    /* non-fatal */
-  }
+  const local = (api && api.storage && api.storage.local) || null;
+  if (!fp || !local) return;
+  storageSet(local, { learnedComposer: fp });
 });
 
-// Surface fail-closed blocks to the extension (badge/toast) if wired later.
+// Surface fail-closed blocks to the extension (badge/toast) if wired later. This
+// direction needs no cloning: the isolated world can read page objects.
 window.addEventListener("gemini-redact:blocked", (e) => {
-  if (globalThis.chrome && chrome.runtime && chrome.runtime.sendMessage) {
-    try {
-      chrome.runtime.sendMessage({ type: "blocked", detail: e.detail });
-    } catch {
-      /* no receiver — non-fatal */
-    }
-  }
+  sendMessage({ type: "blocked", detail: e.detail }).catch(() => {
+    /* no receiver — non-fatal */
+  });
 });
 
 load();
 loadLearned();
-if (globalThis.chrome && chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener(load);
+if (api && api.storage && api.storage.onChanged) {
+  api.storage.onChanged.addListener(load);
 }

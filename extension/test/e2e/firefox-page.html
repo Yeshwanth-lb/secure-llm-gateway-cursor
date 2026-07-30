@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fake Gemini surface (Firefox port harness)</title>
+<!--
+  A minimal stand-in for the Gemini composer, used by run-firefox.mts.
+
+  It differs from fake-gemini.html in one important way: it does NOT stub the
+  `gemini-redact:redact-request` event. The Chrome e2e answers that itself
+  because it loads content-main.js directly with no extension around it. Here the
+  point is the opposite — the REAL extension is installed, so the request must
+  travel MAIN -> content-bridge.js -> background.js -> the loopback gateway and
+  back. Stubbing it would test nothing.
+
+  The page records what WOULD have left the browser: whatever text is in the
+  composer at the moment a send reaches page code.
+-->
+<style>
+  /* Must clear MIN_COMPOSER_AREA (600px²) or findComposer rejects it as a decoy. */
+  #composer { width: 640px; height: 140px; border: 1px solid #999; padding: 8px; font: 14px system-ui; }
+  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Fake Gemini</h1>
+<div id="composer" class="ql-editor" contenteditable="true" role="textbox" aria-label="Enter a prompt here"></div>
+<button aria-label="Send">Send</button>
+<div id="log"></div>
+
+<!-- The nonce is required: run-firefox.mts serves this page under a Gemini-like
+     CSP with 'strict-dynamic', which voids 'unsafe-inline'. -->
+<script nonce="harness">
+  // What reached the page = what would have gone on the wire.
+  window.__sent__ = [];
+  // Fail-closed notifications the extension raises (gateway down, no composer,
+  // loader blocked by CSP, tripwire abort).
+  window.__blocked__ = [];
+  // Proof the ISOLATED content script ran: only content-bridge.js emits this.
+  window.__config__ = null;
+
+  window.addEventListener("gemini-redact:blocked", (e) => {
+    window.__blocked__.push(((e.detail) || {}).reason);
+    render();
+  });
+  window.addEventListener("gemini-redact:config", (e) => {
+    window.__config__ = e.detail || null;
+    render();
+  });
+
+  const box = document.getElementById("composer");
+
+  function doSend() {
+    window.__sent__.push(box.textContent);
+    render();
+  }
+  function render() {
+    document.getElementById("log").textContent = JSON.stringify(
+      { sent: window.__sent__, blocked: window.__blocked__, config: window.__config__ },
+      null,
+      1,
+    );
+  }
+
+  // Bubble phase: the extension's capture-phase listener has already killed the
+  // user's original Enter and (after redacting) re-fired a synthetic one.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) doSend();
+  });
+  document.querySelector('button[aria-label="Send"]').addEventListener("click", doSend);
+  render();
+</script>
+</body>
+</html>

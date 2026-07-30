@@ -188,9 +188,50 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-29 (assistant-reply capture on the obfuscated Gemini panels — suite 141/141)
+**Last updated:** 2026-07-30 (cross-browser port of the extension — Firefox live-verified, Safari packaged-but-unverified; suite 153/153)
 **Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅ + Cursor chat logging (M) ✅ + queue-bypass leak audit (N) ✅ (**queued sends bypass the prompt gate — unfixable in-hook, now audited**) + Cursor attached-file leak audit (O) ✅ (**auto-attached open/selected files bypass the gate like queued sends — unblockable, now audited**) + Gemini-web browser extension (G) 🟢 (G1/G2/G3/G-CORS live-verified on gemini.google.com; G4 tripwire hardened + ON by default; **G-Workspace live-verified 2026-07-21 — Gmail/Docs/Sheets/Slides/Chat side panel redacted on the wire**; **G-Heal self-healing composer finder ✅ 2026-07-22 (Layer 1) + G-Learn focus/fingerprint self-learning ✅ (Layer 1.5) + G5 live selector watcher script ✅ (Layer 2 detect-only)**; G5 enterprise rollout pending)
 **Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Gemini-web extension under `extension/` **works end-to-end live** — all 14 default PII types typed into gemini.google.com are redacted to tokens before leaving the browser (verified 2026-07-20 via `scripts/gen-pii-sample.mjs`), logged as one `gemini · CHAT` row with model + clean prompt/output view. G4 tripwire now Luhn-checked + endpoint-scoped and **ON by default** — a DOM-independent fail-closed net that blocks (not leaks) raw PII if a Gemini UI change breaks the DOM path. **Extended to Google Workspace (2026-07-21): the same extension now redacts the Gmail/Docs/Sheets/Slides/Chat "Ask Gemini" side panel — live-verified token-on-the-wire in Docs + Gmail** (additive change, gemini.google.com untouched). **Assistant output now also captured on the obfuscated panels (Gmail/Drive/Chat) by shape rather than selectors (2026-07-29) — those rows used to read "(none)".** Suite 141/141 green + Gemini e2e 15/15 (incl. Layer-1 self-heal against a reshuffled DOM + Layer-1.5 focus-wins against a competing bigger box). Known limit: `\b`-anchored rules miss PII glued to adjacent chars (see `gemini_imp.md` §7.11).
+
+**Cross-browser port of the extension — Firefox ✅, Safari ⚠️ unverified (2026-07-30):** The
+Chrome MV3 extension now also builds for Firefox and Safari with the browser-agnostic core
+**unchanged** — only `manifest.json`, `background.js`, `content-bridge.js`, `loader.js` plus a
+new `src/browser-api.js` shim (`chrome ?? browser`, zero-dep, NOT `webextension-polyfill`).
+`scripts/build-extension.mjs` generates `extension/build/{firefox,safari}` from the Chrome
+manifest (single source of truth for hosts/permissions); `extension/` stays the Chrome package.
+**No gateway change was needed** — `isExtensionOrigin` (`src/server.ts`) already matches
+`moz-extension://` and `safari-web-extension://` by SCHEME, which also covers Safari rotating
+its extension GUID every launch.
+- **The shim must resolve `chrome` BEFORE `browser`.** Both engines expose both namespaces, but
+  `browser.*` is promise-only: it rejects the trailing callbacks this code passes everywhere and
+  ignores `return true` for a deferred `sendResponse`. Flipping the order fails **closed** (every
+  send blocked) — safe but unusable. `tests/phase-cross-browser.test.ts` locks the order in.
+- **Firefox: no MV3 service worker** (bug 1573659) → generated manifest uses `background.scripts`
+  + `type:"module"`. Firefox 153 loads it with zero manifest warnings, background `RUNNING`.
+- **Firefox needed `cloneInto`.** Gecko isolates the content-script compartment, so a
+  `CustomEvent` `detail` built in `content-bridge.js` is opaque to MAIN ("Permission denied to
+  access property") — MAIN never reads the redaction result and every send blocks. The bridge
+  clones with `cloneInto(detail, window)`, capability-tested so Chrome/Safari are unaffected.
+  Also fixed a startup race by re-publishing the config/learned-composer events (MAIN's module
+  injection can land after the single original dispatch).
+- **The biggest port risk — page CSP killing the MAIN-world injection — is clear.** Gecko applies
+  a page's CSP to content-script-inserted script tags (bugs 1267027/1591983) and Gemini serves
+  `nonce` + `strict-dynamic`; a refusal would mean no interceptor AND no tripwire (silent leak).
+  Verified against the real page with `npm run probe:firefox-csp` (no Google login needed): module
+  loads, tripwire installs. `loader.js` now also escalates a refused load as `blocked`.
+- **Firefox e2e is zero-dep and real:** `npm run test:firefox-e2e` (12/12) installs the built
+  add-on over Firefox's remote debugging protocol (`firefox-rdp.mts` — replaces `web-ext`) and
+  types **trusted** keystrokes over Marionette (`firefox-marionette.mts`), because the loop guard
+  ignores `isTrusted:false`. Covers redacted-token-on-the-wire, zero raw PII, exactly one send,
+  and gateway-down → blocked. **Still manual:** a signed-in send on real gemini.google.com.
+- **Safari could NOT be built or run here** — `xcrun safari-web-extension-converter` ships only
+  with full Xcode; this machine has Command Line Tools only. So the loopback question is OPEN and
+  every Safari step in `extension/README.md` is marked unverified. Handled in advance: Safari's
+  MV3 background *service worker* enforces CORS on extension fetches (Apple DTS 654839), so the
+  Safari manifest declares **only** `background.scripts`; `storage.managed` absence degrades to
+  `local`. Prerequisites documented: App Sandbox → Outgoing Connections (Client), plus macOS ≥ 15
+  Privacy → Local Network → Safari. If Safari does block loopback, the extension blocks sends —
+  **no silent leak** — and that stays the honest outcome (do not move the fetch into the page).
+- Suite **153/153**; Gemini e2e 15/15; response e2e 8/8; Firefox e2e 12/12.
 
 **Assistant output missing for 4 of 7 browser surfaces — FIXED (2026-07-29):** The
 Inspector showed the user prompt for every Gemini surface but the assistant output only for
@@ -578,6 +619,8 @@ Two other same-day fixes that made the above hold: the **generation-wait** fix (
 | G-Learn — Focus/fingerprint self-learning (Layer 1.5) | ✅ Done 2026-07-22 | focus-wins: focused editable beats a bigger competing box / fingerprint: matches same box, rejects diff-tag decoy / recall: saved fingerprint picks box with no focus + heuristic fallback | ✅ 116/116 + e2e 15/15 | `extension/src/composer-learn.js` (pure: `makeFingerprint`/`scoreFingerprintMatch`/`chooseComposer`, unit-tested). Priority **focus > learned fingerprint > heuristic**. Focus = the box the user types in at submit (fixes "Case B" competing boxes); fingerprint (tag/role/aria/stable classes — **no PII**) persisted via bridge to `chrome.storage.local` (`learnedComposer`), restored into MAIN on load — recalls composer after a redesign with one learned submit. Safe realization of "auto-identify" (no leak, no blind selector-patch). e2e `?dom=ambiguous` proves focus-wins in real Chromium. Manifest +`composer-learn.js`. `tests/phase-gemini-core.test.ts`. |
 | G-Reply — Selector-free assistant-reply capture (obfuscated panels) | ✅ Done 2026-07-29 (live per-surface check pending) | happy: streamed reply captured on a rotating-class panel, chip NOT logged (both anchor strategies) / failure: chips-only or no anchor → BLANK response, never a guess / edge: a previous turn's reply (and a hidden one) is never paired with this prompt | ✅ 8/8 (141/141) | `response-finder.js` (pure scorer) + `response-capture.js` (DOM walk, anchored on the submitted text, text-node fast path for Gmail-sized DOMs). Fixes Gmail/Drive/Chat showing "(none)" as assistant output; semantic selectors still run first so Gemini web/Docs/Sheets/Slides are unchanged. `CONFIG.settleMs`/`turnTimeoutMs` now tunable. Browser e2e `npm run test:gemini-response-e2e` (not run here — no chromium binary). `tests/phase-gemini-response.test.ts`, `WORKSPACE_COVERAGE.md` §5.7. |
 | G-Workspace — Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) | ✅ Live-verified 2026-07-21 | live: Docs + Gmail + **Sheets** + Chat network-proven (raw→zero matches; token in streamGenerate/create_message) / Enter-key path works (not just the ↑ arrow) / tripwire `shouldInspectUrl` covers `streamGenerate` | ✅ 116/116 + live | **Additive, gemini.google.com untouched.** `manifest.json` +Workspace hosts (mail/docs/drive/chat) in both match arrays; `composer.js` +`div[contenteditable][aria-label*="Ask Gemini" i]` selector (appsElements, NOT Quill — top-level DOM, not shadow/iframe); `content-main.js` `fireSubmit` now picks the **enabled+visible** send button (Workspace renders a **disabled decoy** `aria="Submit"` beside the real one) and dispatches a **full pointer sequence** (Gm3 Material buttons ignore a bare synthetic click); `tripwire.js` `DEFAULT_GEMINI_ENDPOINTS` +`streamGenerate`/`appsgenaiservice` (Workspace endpoint is lowercase, on appsgenaiservice host). **Selector-order fix (Sheets):** the `aria*="Ask Gemini"` selector must precede the generic `role=textbox`/`textarea` catch-alls in `composer.js` — Sheets' empty stray `role=textbox` boxes were hijacking `findComposer` → `readText`="" → send went out unredacted; reorder fixed it (Quill still first, gemini web unaffected). `content-main.js` has `CONFIG.debug` tracing in `onSubmitEvent` (off) that pinpointed it. Shared panel → one fix covers all five apps. **Drive: in manifest but still untested.** |
+| X-Browser — Firefox port | ✅ Done 2026-07-30 | happy: real Firefox + real add-on + real gateway sends a redacted token, zero raw PII, exactly one send / failure: gateway unreachable → nothing sent + user told + no raw PII on the page / edge: MAIN-world module loads under a gemini-like `nonce`+`strict-dynamic` CSP, and background runs as an event page with no manifest warnings | ✅ 12/12 + 153/153 | `src/browser-api.js` (`chrome` before `browser` — `browser.*` is promise-only), `background.scripts` event page (no MV3 SW, bug 1573659), `cloneInto` for Gecko compartment isolation, config re-publish race fix. Harness: `firefox-rdp.mts` (install over RDP) + `firefox-marionette.mts` (trusted keys). CSP checked on the live page via `npm run probe:firefox-csp`. Live signed-in send still manual. |
+| X-Browser — Safari port | ⚠️ Packaged, NOT verified | n/a — could not build or run | n/a | `npm run ext:build:safari` produces the package, but `xcrun safari-web-extension-converter` needs full Xcode (only CLT installed here), so **loopback fetch is unverified**. Safari-specific choices already made: event page only (MV3 SW enforces CORS on extension fetches), scheme-based extension origin (GUID rotates), `storage.managed` → `local`. Needs: App Sandbox network-client entitlement + macOS Local Network permission. Fail-closed intact if loopback is blocked. |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)
