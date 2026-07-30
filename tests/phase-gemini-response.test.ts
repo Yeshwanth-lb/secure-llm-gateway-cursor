@@ -26,8 +26,31 @@ import {
   scoreResponseCandidate,
   pickResponse,
   looksLikeMetadata,
+  looksLikeBoilerplate,
   MIN_CONFIDENT_RESPONSE_LEN,
 } from "../extension/src/response-finder.js";
+
+test("looksLikeBoilerplate: Gemini's privacy footer / placeholder is chrome, real replies aren't", () => {
+  // The exact footer captured live on Firefox gemini.google.com instead of the reply:
+  assert.equal(
+    looksLikeBoilerplate(
+      "Your Skylo Technologies chats aren't used to improve our models. Gemini is AI and can make mistakes. Your privacy & Gemini Opens in a new window",
+    ),
+    true,
+  );
+  assert.equal(looksLikeBoilerplate("Gemini can make mistakes, so double-check its responses"), true);
+  assert.equal(looksLikeBoilerplate("Ask Gemini"), true); // composer placeholder
+  // Real replies must NOT match.
+  assert.equal(looksLikeBoilerplate("I don't have the ability to send emails directly."), false);
+  assert.equal(looksLikeBoilerplate("Hello! How can I help you today?"), false);
+});
+
+test("scoreResponseCandidate rejects a boilerplateLike block (the always-present footer)", () => {
+  const footer = candidate({ textLen: 140, grew: false, appearedAfterSubmit: false, boilerplateLike: true });
+  const reply = candidate({ textLen: 200, grew: true, boilerplateLike: false });
+  assert.equal(scoreResponseCandidate(footer), -Infinity, "the privacy footer is never the reply");
+  assert.equal(pickResponse([footer, reply]), 1);
+});
 import { createResponseCapture } from "../extension/src/response-capture.js";
 
 // ---------------------------------------------------------------------------

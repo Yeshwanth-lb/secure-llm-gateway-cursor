@@ -39,6 +39,22 @@ export const MIN_CONFIDENT_RESPONSE_LEN = 80;
 /** Above this share of text sitting inside buttons/links, it's a chip list. */
 const MAX_INTERACTIVE_TEXT_RATIO = 0.5;
 
+/**
+ * Static page CHROME that Gemini renders on every surface — the privacy/disclaimer
+ * footer and the composer placeholder — never an actual reply. It is always present
+ * (so it never "appeared after submit" or "grew"), long enough to clear the
+ * confidence floor, and non-interactive, so shape capture would otherwise pick it
+ * when the semantic selectors momentarily read empty — observed live on Firefox
+ * gemini.google.com, where the log caught "…chats aren't used to improve our
+ * models… Opens in a new window" instead of the answer. Pure/exported; unit-tested.
+ */
+const BOILERPLATE_RE =
+  /gemini (is ai and |can )?(can )?make mistakes|chats?\s+(aren'?t|are not)\s+used to improve|opens in a new window|your privacy\s*&\s*gemini|double[- ]check (its|it'?s) responses|ask gemini/i;
+
+export function looksLikeBoilerplate(text) {
+  return BOILERPLATE_RE.test((text || "").replace(/\s+/g, " "));
+}
+
 /** A single comma/newline-separated piece that is a sender label or a timestamp,
  *  never reply content. */
 const META_PIECE =
@@ -87,6 +103,7 @@ export function looksLikeMetadata(text) {
  *   appearedAfterSubmit: boolean, // was not present when the turn started
  *   visible: boolean,             // has layout
  *   metadataLike: boolean,        // just sender/timestamp chrome (looksLikeMetadata)
+ *   boilerplateLike: boolean,     // Gemini privacy footer / placeholder (looksLikeBoilerplate)
  * }
  */
 export function scoreResponseCandidate(d) {
@@ -98,6 +115,7 @@ export function scoreResponseCandidate(d) {
   if (d.interactive) return -Infinity; // a chip / button / link
   if ((d.interactiveTextRatio || 0) > MAX_INTERACTIVE_TEXT_RATIO) return -Infinity; // chip list
   if (d.metadataLike) return -Infinity; // sender label + timestamp row, not the reply
+  if (d.boilerplateLike) return -Infinity; // Gemini's privacy footer / placeholder, not the reply
   if (typeof d.textLen !== "number" || d.textLen < MIN_RESPONSE_LEN) return -Infinity;
   // Confidence bar: something that was already on the page and never changed is
   // only believable as a reply if it is substantial.

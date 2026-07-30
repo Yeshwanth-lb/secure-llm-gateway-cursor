@@ -18,7 +18,13 @@
 //
 // Design ref: WORKSPACE_COVERAGE.md §5.6 (the three panel DOMs).
 
-import { pickResponse, MIN_RESPONSE_LEN, MIN_CONFIDENT_RESPONSE_LEN, looksLikeMetadata } from "./response-finder.js";
+import {
+  pickResponse,
+  MIN_RESPONSE_LEN,
+  MIN_CONFIDENT_RESPONSE_LEN,
+  looksLikeMetadata,
+  looksLikeBoilerplate,
+} from "./response-finder.js";
 
 /** Don't re-walk the DOM more often than this (streaming fires many mutations). */
 const SAMPLE_INTERVAL_MS = 250;
@@ -219,6 +225,7 @@ export function createResponseCapture(sentText, root = document, composerEl = nu
       appearedAfterSubmit: !!rec && baselineTick >= 0 && rec.firstTick > baselineTick,
       visible: isVisible(entry.el),
       metadataLike: looksLikeMetadata(entry.text),
+      boilerplateLike: looksLikeBoilerplate(entry.text),
     };
   }
 
