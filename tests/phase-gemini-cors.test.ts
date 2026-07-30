@@ -80,6 +80,29 @@ test("happy: extension-origin preflight echoes ACAO + allow-private-network; POS
   assert.equal(post.headers["access-control-allow-origin"], EXT, "the redaction response must be readable by the SW");
 });
 
+// --- HAPPY: Firefox + Safari extension origins are allowed too ----------------
+test("happy: moz-extension and safari-web-extension origins get the same hook CORS grant", async () => {
+  for (const origin of [
+    "moz-extension://11111111-2222-3333-4444-555555555555", // Firefox
+    "safari-web-extension://ABCDEF01-2345-6789-ABCD-EF0123456789", // Safari
+  ]) {
+    const pre = await req("OPTIONS", "/redact", {
+      origin,
+      "access-control-request-method": "POST",
+      "access-control-request-private-network": "true",
+    });
+    assert.equal(pre.headers["access-control-allow-origin"], origin, `${origin} must be allowed`);
+    const post = await req(
+      "POST",
+      "/redact",
+      { origin, "content-type": "application/json" },
+      JSON.stringify({ text: "hi", audit: false }),
+    );
+    assert.equal(post.status, 200);
+    assert.equal(post.headers["access-control-allow-origin"], origin);
+  }
+});
+
 // --- FAILURE: a foreign website origin still gets NO CORS grant ---------------
 test("failure: a foreign http(s) origin receives no CORS on the hook endpoints", async () => {
   const pre = await req("OPTIONS", "/redact", {

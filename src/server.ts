@@ -61,18 +61,20 @@ function originAllowed(req: IncomingMessage, config: GatewayConfig): boolean {
 }
 
 /**
- * A browser extension service worker calling the local hook endpoints presents a
- * `chrome-extension://` (or `moz-extension://`) Origin, which is NOT loopback.
- * Such an origin is only reachable by an installed extension on this machine —
- * a different, narrower trust class than a foreign website (http/https origin),
- * which stays blocked. Allowed ONLY for the hook endpoints (/detect, /redact),
- * which take text and return a redaction result + match counts — they expose no
- * stored traffic, secrets, or control-plane state. (Gemini-web extension, 2026-07-20.)
+ * A browser extension service worker calling the local hook endpoints presents an
+ * extension-scheme Origin — `chrome-extension://` (Chrome/Edge), `moz-extension://`
+ * (Firefox), or `safari-web-extension://` (Safari) — which is NOT loopback. Such an
+ * origin is only reachable by an installed extension on this machine — a narrower
+ * trust class than a foreign website (http/https origin), which stays blocked.
+ * Allowed ONLY for the hook endpoints (/detect, /redact, /log-turn), which take
+ * text and return a redaction result + match counts — they expose no stored
+ * traffic, secrets, or control-plane state. (Gemini-web extension, 2026-07-20;
+ * Firefox/Safari schemes added 2026-07-30 for the cross-browser port.)
  */
 function isExtensionOrigin(origin: string | string[] | undefined): boolean {
   if (origin === undefined) return false;
   const o = Array.isArray(origin) ? origin[0] : origin;
-  return /^(?:chrome-extension|moz-extension):\/\//i.test(o);
+  return /^(?:chrome-extension|moz-extension|safari-web-extension):\/\//i.test(o);
 }
 
 /** POST /api/* mutations: when adminToken is set, require token or loopback browser Origin. */
