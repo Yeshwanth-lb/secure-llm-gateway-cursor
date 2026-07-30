@@ -18,16 +18,16 @@
 //
 // Design ref: WORKSPACE_COVERAGE.md §5.6 (the three panel DOMs).
 
-import { pickResponse, MIN_RESPONSE_LEN } from "./response-finder.js";
+import { pickResponse, MIN_RESPONSE_LEN, MIN_CONFIDENT_RESPONSE_LEN, looksLikeMetadata } from "./response-finder.js";
 
 /** Don't re-walk the DOM more often than this (streaming fires many mutations). */
 const SAMPLE_INTERVAL_MS = 250;
 /** How far up from the anchor we look for a container that holds the reply too.
- *  Kept TIGHT on purpose: widening it (tried in 9314f14) made the shape finder on
- *  Chat's obfuscated DOM climb into the message-LIST container and log sender
- *  labels + timestamps ("Ask Gemini , 1 min ,") as the reply — a wrong pairing,
- *  which is worse than a blank one. Reverted. */
-const MAX_SCOPE_HOPS = 8;
+ *  The obfuscated panels (Chat/Gmail/Drive) nest deeply, so the reply is only in
+ *  scope with a generous cap. This pulls the message-LIST chrome (sender labels +
+ *  timestamps) into the candidate set too, but the finder's `metadataLike`
+ *  disqualifier drops those, so they can no longer be logged as the reply. */
+const MAX_SCOPE_HOPS = 16;
 /** Safety valve: never score more candidates than this in one pass. */
 const MAX_CANDIDATES = 600;
 /** Cap what we hand to the gateway (it stores a snapshot, not a transcript). */
@@ -135,7 +135,10 @@ function findScope(anchor) {
   let last = null;
   for (let i = 0; i < MAX_SCOPE_HOPS && el; i++) {
     last = el;
-    if (textOf(el).length >= anchorLen + MIN_RESPONSE_LEN) return el;
+    // Climb until an ancestor holds a reply's worth of text BEYOND the prompt —
+    // it demonstrably contains the answer, not just the user's own bubble. Safe
+    // to be generous now: metadata rows in this scope are dropped by the finder.
+    if (textOf(el).length >= anchorLen + MIN_CONFIDENT_RESPONSE_LEN) return el;
     el = el.parentElement;
   }
   return last;
@@ -215,6 +218,7 @@ export function createResponseCapture(sentText, root = document, composerEl = nu
       interactiveTextRatio: interactiveTextRatio(entry.el, entry.text.length),
       appearedAfterSubmit: !!rec && baselineTick >= 0 && rec.firstTick > baselineTick,
       visible: isVisible(entry.el),
+      metadataLike: looksLikeMetadata(entry.text),
     };
   }
 
