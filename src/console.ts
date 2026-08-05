@@ -361,8 +361,14 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
       // turns replayed from Cursor's transcript — neither was sent to a provider
       // by us, so label both "cursor" rather than the stored placeholder enum
       // (Provider is a frozen contract, so the label lives here, not in the data).
-      var isCursor = e.method === "HOOK" || String(e.path || "").indexOf("cursor") === 0;
-      var provLabel = isCursor ? "cursor" : e.provider;
+      // Browser-extension surfaces (ChatGPT/Grok/DeepSeek) all bucket under the
+      // "openai" API family in the FROZEN enum but carry a distinguishing source
+      // in e.path (e.g. "grok-web-extension"); show the SURFACE name, not
+      // "openai", so the row reads "grok"/"deepseek"/"chatgpt" like the user sees.
+      var src = String(e.path || "");
+      var isCursor = e.method === "HOOK" || src.indexOf("cursor") === 0;
+      var extMatch = src.match(/^([a-z0-9]+)-web-extension$/);
+      var provLabel = isCursor ? "cursor" : extMatch ? extMatch[1] : e.provider;
       // "unchecked" = reached the model without passing the PII gate (a Cursor
       // message queued while the agent was busy skips beforeSubmitPrompt, so it
       // cannot be blocked). Red only alongside PII — that pair is a real leak.

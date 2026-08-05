@@ -28,8 +28,23 @@ const toPageDetail =
 // `tripwire`/`tripwireEndpoints` are omitted here so they fall back to the
 // MAIN-world defaults (tripwire ON, built-in endpoint list) unless managed/local
 // storage explicitly overrides them. Only keys present in storage are relayed.
+//
+// Every key content-main.js reads off CONFIG must be listed, or it is dead config:
+// storage is read, the key is dropped here, and MAIN silently keeps its default.
+// `uploadPolicy` was missing, which made the documented "warn" escape hatch
+// unreachable in a real browser — the e2e sets config by dispatching the MAIN
+// event directly, so it never exercised this list. `tests/phase-upload.test.ts`
+// now guards it.
 const DEFAULTS = { base: "http://127.0.0.1:8001", enabled: true };
-const CONFIG_KEYS = ["base", "enabled", "tripwire", "tripwireEndpoints", "debug"];
+const CONFIG_KEYS = [
+  "base",
+  "enabled",
+  "tripwire",
+  "tripwireEndpoints",
+  "debug",
+  "uploadGuard",
+  "uploadPolicy",
+];
 
 // Startup race: MAIN world arrives as an async `<script type="module">` load
 // (loader.js) while the config below arrives from an async storage read. If the
@@ -89,6 +104,15 @@ window.addEventListener("gemini-redact:redact-request", (e) => {
   // sendMessage resolves undefined when there is no receiver (dead worker) or
   // messaging is unavailable -> respond({ok:false}) -> caller fails closed.
   sendMessage({ type: "redact", text }).then(respond, () => respond({ ok: false }));
+});
+
+// Relay an admin surface-policy request MAIN -> background -> gateway
+// (GET /internal/config/:surface) and hand the {enabled,mode} back. Correlated
+// by surface; null result means the poll failed and MAIN keeps its last policy.
+window.addEventListener("gemini-redact:policy-request", (e) => {
+  const surface = (e && e.detail && e.detail.surface) || "";
+  const respond = (result) => emit("gemini-redact:policy-response", { surface, result: result || null });
+  sendMessage({ type: "getSurfaceConfig", surface }).then(respond, () => respond(null));
 });
 
 // Relay per-turn chat logging (redacted prompt + response) MAIN -> background.

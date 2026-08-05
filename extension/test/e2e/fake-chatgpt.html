@@ -1,0 +1,250 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Fake ChatGPT — send path + reply capture (e2e harness)</title>
+<!--
+  Stand-in for chatgpt.com, used by run-chatgpt.mts. It reproduces the parts of
+  the real page that the extension depends on, as confirmed live on 2026-07-30
+  (`npm run probe:chatgpt`):
+
+    - the composer is a ProseMirror `div#prompt-textarea[contenteditable]` that
+      keeps its OWN document model. The request is built from THAT MODEL, never
+      from the DOM node's text — which is why a synthetic write has to reach the
+      model or the RAW prompt ships. The model here syncs from `input` events
+      (as ProseMirror does, via beforeinput/mutations), so a bare
+      `textContent = "..."` assignment would NOT reach it.
+    - a hidden companion `textarea[name="prompt-textarea"]` that the request
+      deliberately IGNORES. On the real page this textarea accepts a value and
+      changes nothing that ships — writing it leaks. Keeping it here makes that
+      trap a test failure rather than a live incident.
+    - `button[data-testid="send-button"]`, replaced by
+      `button[data-testid="stop-button"]` while generating.
+    - the reply in `div[data-message-author-role="assistant"] .markdown`.
+    - the model switcher `[data-testid="model-switcher-dropdown-button"]`.
+    - a `div.ql-editor` DECOY: a Gemini composer selector. On chatgpt.com it must
+      never win, which is what hostname-scoped adapters guarantee.
+
+  Modes:
+    (default)  normal page — the write reaches the model.
+    ?stale=1   the editor IGNORES programmatic edits (its model only follows real
+               keystrokes). The DOM path then cannot redact, the RAW prompt would
+               ship, and the G4 tripwire MUST abort the request. This is the
+               ProseMirror-desync failure the probe ruled out, kept as a test so
+               the fail-closed net stays proven for it.
+
+  The PII value arrives via ?pii= so no PII literal lives in this fixture.
+-->
+<style>
+  #prompt-textarea { display: block; width: 520px; min-height: 48px; border: 1px solid #ccc; }
+  #decoy { display: block; width: 620px; min-height: 90px; border: 1px solid #eee; }
+  .markdown { display: block; width: 520px; min-height: 20px; }
+</style>
+
+<button data-testid="model-switcher-dropdown-button" aria-label="Model selector">ChatGPT 5 Thinking</button>
+
+<main id="thread"></main>
+
+<!-- The Gemini-only composer selector, present as a decoy. -->
+<div id="decoy" class="ql-editor" contenteditable="true" role="textbox" aria-label="Ask Gemini">decoy composer</div>
+
+<form>
+  <div id="prompt-textarea" class="ProseMirror" contenteditable="true" translate="no"><p><br /></p></div>
+  <textarea class="wcDTda_fallbackTextarea" name="prompt-textarea" style="height: 0; width: 0; position: absolute; left: -9999px"></textarea>
+  <input type="file" id="file-input" multiple />
+  <button data-testid="send-button" aria-label="Send prompt">Send</button>
+</form>
+
+<script>
+  // Captured BEFORE the extension module loads, so the harness's gateway calls
+  // are not seen by the tripwire — mirroring reality, where the gateway is
+  // reached from the background worker and never from the page.
+  const RAWFETCH = window.fetch.bind(window);
+  const params = new URLSearchParams(location.search);
+  const BASE = params.get("base"); // gateway
+  const STALE = params.get("stale") === "1";
+  const REPLY = "Sure — here is the summary you asked for, with the next steps listed at the end.";
+
+  window.__sent__ = []; // request bodies the page actually POSTed
+  window.__logged__ = []; // what content-main reports for /log-turn
+  window.__blocked__ = [];
+
+  const editor = document.getElementById("prompt-textarea");
+  const mirror = document.querySelector("textarea[name='prompt-textarea']");
+  const thread = document.getElementById("thread");
+
+  // ---- the editor's OWN document model -------------------------------------
+  // This is the whole point of the fixture: what gets SENT is `model`, not the
+  // DOM text. ProseMirror keeps such a model and updates it from the browser's
+  // editing pipeline (beforeinput / DOM mutations), which `execCommand` drives
+  // and a raw `textContent` assignment does not.
+  let model = "";
+  if (STALE) {
+    // A model that only ever follows real keystrokes: no programmatic edit can
+    // reach it. The extension must then fail closed via the tripwire.
+    editor.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") return;
+      if (e.key === "Backspace") model = model.slice(0, -1);
+      else if (e.key.length === 1) model += e.key;
+    });
+  } else {
+    editor.addEventListener("input", () => {
+      model = editor.textContent || "";
+    });
+  }
+
+  // ---- the page's own send path --------------------------------------------
+  function stopButton(on) {
+    const send = document.querySelector('button[data-testid="send-button"]');
+    if (on) {
+      const stop = document.createElement("button");
+      stop.setAttribute("data-testid", "stop-button");
+      stop.setAttribute("aria-label", "Stop streaming");
+      stop.textContent = "Stop";
+      send.replaceWith(stop);
+    } else {
+      const stop = document.querySelector('button[data-testid="stop-button"]');
+      if (stop) {
+        const btn = document.createElement("button");
+        btn.setAttribute("data-testid", "send-button");
+        btn.setAttribute("aria-label", "Send prompt");
+        btn.textContent = "Send";
+        stop.replaceWith(btn);
+      }
+    }
+  }
+
+  function turn(role) {
+    const el = document.createElement("div");
+    el.setAttribute("data-message-author-role", role);
+    const body = document.createElement("div");
+    body.className = "markdown";
+    el.appendChild(body);
+    thread.appendChild(el);
+    return body;
+  }
+
+  function streamReply() {
+    const body = turn("assistant");
+    const words = REPLY.split(" ");
+    let i = 0;
+    return new Promise((resolve) => {
+      const t = setInterval(() => {
+        body.textContent = words.slice(0, ++i).join(" ");
+        if (i >= words.length) {
+          clearInterval(t);
+          stopButton(false);
+          resolve();
+        }
+      }, 50);
+    });
+  }
+
+  let sending = false;
+  async function doSend() {
+    if (sending) return;
+    const text = model; // the MODEL is what ships — never the DOM node's text
+    if (!text.trim()) return;
+    sending = true;
+    turn("user").textContent = text;
+    stopButton(true);
+    try {
+      // Deliberately the WRAPPED window.fetch, on a URL shaped like the real
+      // endpoint, so the tripwire's endpoint scoping is exercised for real. An
+      // abort here must surface as "nothing sent".
+      await window.fetch("/backend-api/conversation", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "next",
+          messages: [{ author: { role: "user" }, content: { content_type: "text", parts: [text] } }],
+          model: "auto",
+        }),
+      });
+      window.__sent__.push(text);
+    } catch (e) {
+      window.__aborted__ = String((e && e.message) || e);
+      stopButton(false);
+      sending = false;
+      return;
+    }
+    model = "";
+    editor.textContent = "";
+    mirror.value = "";
+    sending = false;
+    await streamReply();
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) doSend();
+  });
+  document.querySelector('button[data-testid="send-button"]').addEventListener("click", () => doSend());
+  // The send button is recreated around generation, so the click path is bound
+  // by delegation too (matches the real page, where React owns the button).
+  document.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest && e.target.closest('button[data-testid="send-button"]');
+    if (btn) doSend();
+  });
+
+  // ---- bridge stand-in: MAIN -> (isolated bridge -> background) -> gateway --
+  window.addEventListener("gemini-redact:redact-request", async (e) => {
+    const { id, text } = (e && e.detail) || {};
+    let result = { ok: false };
+    try {
+      const r = await RAWFETCH(BASE + "/redact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, source: "chatgpt-web-extension", audit: false }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        result = { ok: true, redacted: j.redacted, piiDetected: j.piiDetected };
+      }
+    } catch {
+      /* fail closed */
+    }
+    window.dispatchEvent(new CustomEvent("gemini-redact:redact-response", { detail: { id, result } }));
+  });
+  window.addEventListener("gemini-redact:blocked", (e) => window.__blocked__.push((e.detail || {}).reason));
+  window.addEventListener("gemini-redact:log-turn", (e) => window.__logged__.push(e.detail || {}));
+
+  // ---- file upload, reproducing the live flow -------------------------------
+  // Probed on chatgpt.com 2026-07-30: on `change`, page JS reads `input.files`
+  // and XHR-PUTs the File itself to a REGION-SPECIFIC oaiusercontent.com host —
+  // ~19s before the message is sent. The host below is a stand-in for that
+  // pattern; the harness intercepts it, so no external request is made.
+  //
+  // This listener is on the INPUT (target phase), so the guard's document-level
+  // CAPTURE listener necessarily runs first — exactly the ordering that lets it
+  // swallow the original event and re-fire a redacted one.
+  const UPLOAD_URL = "https://sdmntprfixture.oaiusercontent.com/files/00000000-fixture-0000/raw";
+  window.__uploads__ = []; // { name, size, type } the page was handed
+  const fileInput = document.getElementById("file-input");
+  fileInput.addEventListener("change", () => {
+    for (const f of fileInput.files) {
+      window.__uploads__.push({ name: f.name, size: f.size, type: f.type });
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", UPLOAD_URL);
+      try {
+        xhr.send(f); // the File IS the body, as observed live
+      } catch (e) {
+        // The tripwire aborts by throwing from send().
+        window.__uploadAborted__ = String((e && e.message) || e);
+      }
+    }
+  });
+
+  // Bypass path for the backstop test: PUT a raw Blob with no input involved, as
+  // if the DOM guard had failed or been circumvented. The tripwire must abort it.
+  window.__rawUpload__ = (text) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", UPLOAD_URL);
+    try {
+      xhr.send(new Blob([text], { type: "text/plain" }));
+      return "sent";
+    } catch (e) {
+      window.__uploadAborted__ = String((e && e.message) || e);
+      return "threw";
+    }
+  };
+</script>
+
+<script type="module" src="/src/content-main.js"></script>

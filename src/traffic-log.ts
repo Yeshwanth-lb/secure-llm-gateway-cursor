@@ -6,6 +6,17 @@ import type { LogEntry } from "./contracts.ts";
 
 const CAP = 100;
 
+// Optional post-push listener. The admin subsystem registers one to persist an
+// analytics event per decision (metadata only, no raw PII). Kept as a single
+// nullable hook so the ring buffer stays dependency-free and every existing
+// `trafficLog.push` call site emits an event without being edited. The listener
+// must never throw (it is wrapped below) — analytics is best-effort and must
+// never affect traffic.
+let onPush: ((e: LogEntry) => void) | null = null;
+export function setTrafficListener(fn: ((e: LogEntry) => void) | null): void {
+  onPush = fn;
+}
+
 export const trafficLog: {
   push(e: LogEntry): void;
   recent(limit: number, filterRedacted: boolean): LogEntry[];
@@ -16,6 +27,13 @@ export const trafficLog: {
     push(e: LogEntry): void {
       buf.push(e);
       if (buf.length > CAP) buf.shift();
+      if (onPush) {
+        try {
+          onPush(e);
+        } catch {
+          /* never let the analytics hook affect traffic */
+        }
+      }
     },
     recent(limit: number, filterRedacted: boolean): LogEntry[] {
       let items = buf.slice().reverse(); // newest first

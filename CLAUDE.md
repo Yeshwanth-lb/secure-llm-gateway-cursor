@@ -188,391 +188,47 @@ A phase is **done** only when **all** of these hold:
 
 ## 8. Project Status Ledger  *(UPDATE THIS — it is the living part)*
 
-**Last updated:** 2026-07-30 (cross-browser port of the extension — Firefox live-verified, Safari packaged-but-unverified; suite 153/153)
-**Current phase:** Phases 0–C ✅ + frontend (D) + control-plane console (E) ✅ + cross-platform client integration (I) ✅ + Cursor real redaction (J translation shim + K block-hooks) ✅ + Cursor tool-data scrub (L) ✅ + Cursor chat logging (M) ✅ + queue-bypass leak audit (N) ✅ (**queued sends bypass the prompt gate — unfixable in-hook, now audited**) + Cursor attached-file leak audit (O) ✅ (**auto-attached open/selected files bypass the gate like queued sends — unblockable, now audited**) + Gemini-web browser extension (G) 🟢 (G1/G2/G3/G-CORS live-verified on gemini.google.com; G4 tripwire hardened + ON by default; **G-Workspace live-verified 2026-07-21 — Gmail/Docs/Sheets/Slides/Chat side panel redacted on the wire**; **G-Heal self-healing composer finder ✅ 2026-07-22 (Layer 1) + G-Learn focus/fingerprint self-learning ✅ (Layer 1.5) + G5 live selector watcher script ✅ (Layer 2 detect-only)**; G5 enterprise rollout pending)
-**Overall:** Core gateway, console, model policy, clean view, global client integration, Cursor block-hooks, and Cursor tool-data scrub complete. Gemini-web extension under `extension/` **works end-to-end live** — all 14 default PII types typed into gemini.google.com are redacted to tokens before leaving the browser (verified 2026-07-20 via `scripts/gen-pii-sample.mjs`), logged as one `gemini · CHAT` row with model + clean prompt/output view. G4 tripwire now Luhn-checked + endpoint-scoped and **ON by default** — a DOM-independent fail-closed net that blocks (not leaks) raw PII if a Gemini UI change breaks the DOM path. **Extended to Google Workspace (2026-07-21): the same extension now redacts the Gmail/Docs/Sheets/Slides/Chat "Ask Gemini" side panel — live-verified token-on-the-wire in Docs + Gmail** (additive change, gemini.google.com untouched). **Assistant output now also captured on the obfuscated panels (Gmail/Drive/Chat) by shape rather than selectors (2026-07-29) — those rows used to read "(none)".** Suite 141/141 green + Gemini e2e 15/15 (incl. Layer-1 self-heal against a reshuffled DOM + Layer-1.5 focus-wins against a competing bigger box). Known limit: `\b`-anchored rules miss PII glued to adjacent chars (see `gemini_imp.md` §7.11).
+**Last updated:** 2026-08-04 — Admin dashboard (U): zero-dep login-gated control plane
+(analytics + AI controls + audit) at `/admin`, `node:sqlite` + `node:crypto`, suite 197/197
+(live UI check pending). Prior 2026-08-03 — DeepSeek (T) live-verified; Gemini uploads armed;
+Chrome Workspace-panel composer model-sync fixed (delete+insert).
 
-**Cross-browser port of the extension — Firefox ✅, Safari ⚠️ unverified (2026-07-30):** The
-Chrome MV3 extension now also builds for Firefox and Safari with the browser-agnostic core
-**unchanged** — only `manifest.json`, `background.js`, `content-bridge.js`, `loader.js` plus a
-new `src/browser-api.js` shim (`chrome ?? browser`, zero-dep, NOT `webextension-polyfill`).
-`scripts/build-extension.mjs` generates `extension/build/{firefox,safari}` from the Chrome
-manifest (single source of truth for hosts/permissions); `extension/` stays the Chrome package.
-**No gateway change was needed** — `isExtensionOrigin` (`src/server.ts`) already matches
-`moz-extension://` and `safari-web-extension://` by SCHEME, which also covers Safari rotating
-its extension GUID every launch.
-- **The shim must resolve `chrome` BEFORE `browser`.** Both engines expose both namespaces, but
-  `browser.*` is promise-only: it rejects the trailing callbacks this code passes everywhere and
-  ignores `return true` for a deferred `sendResponse`. Flipping the order fails **closed** (every
-  send blocked) — safe but unusable. `tests/phase-cross-browser.test.ts` locks the order in.
-- **Firefox: no MV3 service worker** (bug 1573659) → generated manifest uses `background.scripts`
-  + `type:"module"`. Firefox 153 loads it with zero manifest warnings, background `RUNNING`.
-- **Firefox needed `cloneInto`.** Gecko isolates the content-script compartment, so a
-  `CustomEvent` `detail` built in `content-bridge.js` is opaque to MAIN ("Permission denied to
-  access property") — MAIN never reads the redaction result and every send blocks. The bridge
-  clones with `cloneInto(detail, window)`, capability-tested so Chrome/Safari are unaffected.
-  Also fixed a startup race by re-publishing the config/learned-composer events (MAIN's module
-  injection can land after the single original dispatch).
-- **The biggest port risk — page CSP killing the MAIN-world injection — is clear.** Gecko applies
-  a page's CSP to content-script-inserted script tags (bugs 1267027/1591983) and Gemini serves
-  `nonce` + `strict-dynamic`; a refusal would mean no interceptor AND no tripwire (silent leak).
-  Verified against the real page with `npm run probe:firefox-csp` (no Google login needed): module
-  loads, tripwire installs. `loader.js` now also escalates a refused load as `blocked`.
-- **Firefox e2e is zero-dep and real:** `npm run test:firefox-e2e` (12/12) installs the built
-  add-on over Firefox's remote debugging protocol (`firefox-rdp.mts` — replaces `web-ext`) and
-  types **trusted** keystrokes over Marionette (`firefox-marionette.mts`), because the loop guard
-  ignores `isTrusted:false`. Covers redacted-token-on-the-wire, zero raw PII, exactly one send,
-  and gateway-down → blocked. **Live signed-in send on real gemini.google.com — DONE
-  2026-07-30:** prompt redacted on the wire + real replies captured for 3 turns, identical
-  to Chrome. (That test also surfaced the privacy-footer capture bug now fixed for all
-  browsers — `looksLikeBoilerplate`, `7ff1869`.)
-- **Safari could NOT be built or run here** — `xcrun safari-web-extension-converter` ships only
-  with full Xcode; this machine has Command Line Tools only. So the loopback question is OPEN and
-  every Safari step in `extension/README.md` is marked unverified. Handled in advance: Safari's
-  MV3 background *service worker* enforces CORS on extension fetches (Apple DTS 654839), so the
-  Safari manifest declares **only** `background.scripts`; `storage.managed` absence degrades to
-  `local`. Prerequisites documented: App Sandbox → Outgoing Connections (Client), plus macOS ≥ 15
-  Privacy → Local Network → Safari. If Safari does block loopback, the extension blocks sends —
-  **no silent leak** — and that stays the honest outcome (do not move the fetch into the page).
-- Suite **153/153**; Gemini e2e 15/15; response e2e 8/8; Firefox e2e 12/12.
+**Working surfaces (Chrome unless noted):** gemini.google.com · Google Workspace panels
+(Gmail/Docs/Sheets/Slides/Drive/Chat — Drive slightly flaky) · chatgpt.com (also Firefox) ·
+grok.com · chat.deepseek.com. Cursor: block-on-prompt + tool-scrub + per-turn logging +
+unblockable-path audit. Gateway core + console + Cursor shim complete (Phases 0–C, D, E, I, J–O).
+**Admin dashboard (U):** `GET /admin` (seed via `npm run admin:seed`); analytics fed by a
+`trafficLog` listener (metadata only), per-surface controls + global PII-type toggles, audit log;
+`/internal/events` + `/internal/config/:surface` for enforcement points (extension/Cursor wiring
+documented, not yet wired). See `ADMIN_DASHBOARD.md`.
 
-**Assistant output missing for 4 of 7 browser surfaces — FIXED (2026-07-29):** The
-Inspector showed the user prompt for every Gemini surface but the assistant output only for
-Gemini web, Docs, Sheets and Slides; Gmail, Drive and Chat read "(none)". Cause was already
-documented (§5.6 of `extension/WORKSPACE_COVERAGE.md`): those panels are the OBFUSCATED
-builds whose class names rotate every Google deploy, so `RESPONSE_SELECTORS` can't match,
-and the earlier `last [role="listitem"]` fallback had been reverted for grabbing a
-**suggestion chip** instead of the reply. Fixed by capturing the reply by **shape**, anchored
-on the text we just submitted: `extension/src/response-capture.js` finds the **deepest**
-element containing the sent text (the user's bubble — depth, not text length: on a first turn
-the whole conversation container holds exactly the prompt, and anchoring there puts the reply
-*inside* the anchor where it is excluded — real bug, caught by the new tests) and tracks
-blocks that **follow** it; `extension/src/response-finder.js` (pure) ranks them on behavior
-rather than class names — a reply **streams** (text grows across samples) and is
-non-interactive, whereas chips arrive fully formed as buttons. Blocks preceding the user's
-message are disqualified outright, so a previous turn's reply can never be mispaired. The old
-invariant is kept as the tie-breaker: nothing clears the bar ⇒ log a **blank** response.
-Semantic selectors still run first, so the four working surfaces are untouched.
-- Anchor lookup has a **text-node fast path** (`createTreeWalker`) because concatenating
-  `textContent` for every element on a DOM the size of Gmail's would jank the page mid-stream;
-  the element scan remains the fallback and both paths are tested.
-- `CONFIG.settleMs`/`CONFIG.turnTimeoutMs` are now configurable (were hardcoded 2500/30000)
-  so the e2e can exercise the "no reply ever arrives" path without a 30s wait.
-- `tests/phase-gemini-response.test.ts` (8 tests: scorer trio + DOM walk against a minimal
-  zero-dep DOM shim, both anchor strategies) → suite **141/141**. Browser-gated:
-  `npm run test:gemini-response-e2e` (`extension/test/e2e/run-response.mts` +
-  `fake-panel.html` reproduce all three panel shapes; needs `npx playwright install chromium`,
-  **not yet run here — chromium binary unavailable in this environment**). Live per-surface
-  confirmation in the Inspector still pending for Gmail/Drive/Chat.
+**Uploads** (attach-time scrub; unscannable → block; Office DOCX/XLSX/PPTX → zip+XML scrub):
+armed + probed on ChatGPT, Grok, DeepSeek, gemini.google.com. Workspace-panel upload endpoint
+unprobed (the attach-time guard still scrubs; only the wire backstop is uncovered there).
 
-**DOM-change resilience (2026-07-22, Layers 1 + 1.5 + 2):** `findComposer` (`extension/src/composer.js`) now tries a fast-path of **Gemini-SPECIFIC** selectors only (`div.ql-editor`, `rich-textarea .ql-editor`, Workspace `aria*="Ask Gemini"`) — the generic catch-alls (`role=textbox`, bare `textarea`) were **removed from the fast-path** because a blind generic match can return the wrong sane element (a search box / doc canvas) before stronger signals run (this leaked raw PII in the Layer-1.5 e2e until fixed). When the fast-path misses, all editable candidates go through `chooseComposer` (`extension/src/composer-learn.js`): **focus** (the box the user is typing in — decisive when several big boxes compete, "Case B") > **learned fingerprint** (persisted from a prior focused submit, so a later load recalls the composer after a redesign) > **heuristic shape** (`composer-finder.js`: size ≥ `MIN_COMPOSER_AREA`, prompt-like label, near an enabled send button). One path covers gemini.google.com + every Workspace app. The learned fingerprint is shape metadata only (tag/role/aria/stable class tokens — **never PII**), persisted via the isolated bridge to `chrome.storage.local` (`learnedComposer`) and restored into MAIN on load. Security is unchanged: an unfindable composer still fails **closed** (`content-main.js`) and the G4 tripwire still aborts raw PII on the wire — availability/UX win, not a security change. **Layer 2** is a detect-only canary (`scripts/selector-watch.mjs`, `npm run watch:selectors`): opens the real surfaces in a pre-logged-in Chrome profile (`--hold` keeps the browser open to sign in / open Workspace panels, then Enter to probe), reports whether the composer is findable, writes `~/.secure-llm-gateway/selector-watch-report.json`, exits non-zero on a hard break (gemini composer missing, or raw PII on the wire with `WATCH_SEND=1`). `--self-check` validates the probe headlessly. **Live-verified 2026-07-22: gemini composerFound=true on real gemini.google.com.** **Layer 3 (blind offline auto-patch of selectors) deliberately NOT built** — Layer 1.5 is the safe realization of "auto-identify after a Google change": it learns by the focus-at-submit signal (evidence, no leak) rather than guessing + persisting a selector.
+**Key operational gotchas** (full dated writeups archived in `LEDGER_HISTORY.md`):
+- **Gateway restart** → Chrome re-asks Local Network Access; Allow it + reload the extension, or
+  every SW→loopback `/redact` fails and sends/uploads block as `gateway-unreachable`.
+- **Workspace "Ask Gemini" composer** (appsElements `role=combobox`, controlled model): write the
+  redacted text via `execCommand("delete")` then `insertText`, scoped by the `appsElements` class —
+  **NEVER synthetic keystrokes** (they break normal sends). See `composer.js` `writeText` +
+  memory `workspace-composer-model-sync`. Google moves this; re-run the editable-dump diagnostic
+  before changing the write.
+- **DeepSeek encrypts its request body** (WASM proof-of-work) → the tripwire is BLIND on its chat
+  send; the composer intercept (a plain `<textarea>`) is the sole protection. Its UPLOAD body is
+  plaintext FormData, so the upload backstop works there.
+- **Provider labels:** ChatGPT/Grok/DeepSeek log under the FROZEN `openai` enum and are told apart
+  by `source`; the console relabels `*-web-extension` → the surface name. Never widen the enum.
+- **A stale generated package is an UNPROTECTED surface** (not fail-closed): run `npm run ext:build`
+  after touching `extension/`; `tests/phase-cross-browser.test.ts` guards it.
+- **Cursor has two unblockable leak paths** (messages queued while busy + auto-attached open/selected
+  files) — audited via the `unchecked` pill + desktop alert, not blockable in-hook.
+- Ring-buffer `entries` is **not** chronological — sort by `timestamp` before taking "the latest".
+- A `\[REDACTED_PII_[A-Z_]+\]` scan silently misses `IPV4`/`IPV6` (they end in digits).
 
-**Gemini-web extension (Phase G, started 2026-07-20):** New workstream under
-`extension/` (sibling to `src/`, not coupled to the gateway module graph — it
-only calls `POST /redact` over loopback, same pattern as the Cursor hooks).
-Design + phase gates: `scripts/gemini_imp.md` (rev.2). Key decisions:
-- **Gemini web can't use the loopback-gateway approach** (like Claude Desktop /
-  Cursor chat) — the browser sends prompts from Google's servers, so there's no
-  on-machine request path to occupy. The only local interception point is a
-  **browser extension** working at the **DOM level** (MV3 forbids rewriting
-  request bodies).
-- **One-way redaction (rev.2).** No reversible map, no restore-for-display. The
-  user's own message and every reply permanently show fixed tokens
-  (`[REDACTED_PII_EMAIL]`). This deliberately deleted an entire complexity class
-  and means the **existing `/redact` endpoint is reused UNCHANGED** (no new
-  backend, no map field).
-- **The real risk is Stage 3 (kill + re-fire), not the DOM read.** You can't
-  pause a DOM event across an async gateway call, so the design fully kills the
-  original submit (`preventDefault` + `stopImmediatePropagation` on a
-  `document`-level capture listener) and independently re-fires a redacted
-  submit. Two failure modes are handled explicitly: (a) **loop guard** — our own
-  synthetic re-submit must not be re-intercepted (flag + event tag +
-  `isTrusted:false` check, in `extension/src/interceptor-core.js`); (b)
-  **framework model sync** — writing text must use the native setter + a real
-  `input` event or the framework may submit stale pre-redaction text.
-- **Testable core factored out.** Loop guard / fail-closed / tripwire-predicate
-  are pure and unit-tested headlessly (`tests/phase-gemini-core.test.ts`); the
-  selector/DOM code (`composer.js`) can only be validated against the live
-  Gemini page (Stages 2/3/5, manual — see `extension/README.md`).
-- **MV3 loading:** content scripts can't `import`, so an isolated-world
-  `loader.js` injects the MAIN-world ES module via `web_accessible_resources`
-  (no bundler, stays zero-build).
-- **CORS blocker found + fixed (2026-07-20).** The gateway grants CORS to
-  **loopback origins only** (`src/server.ts` `corsHeaders`, §5) and the `/redact`
-  **POST** response carries no `Access-Control-Allow-Origin` at all (only the
-  OPTIONS preflight does). So a fetch from the page (MAIN world, gemini.google.com
-  origin — or even a loopback page origin) is browser-blocked → the extension
-  would fail closed on every message. Fix: the gateway is left UNCHANGED; the
-  `/redact` fetch moved to a **background service worker** (`src/background.js`),
-  which has `host_permissions` for `127.0.0.1:8000` and is not subject to page
-  CORS. Path is now MAIN → `CustomEvent` → isolated bridge →
-  `chrome.runtime.sendMessage` → SW → fetch. The page never fetches the gateway.
-- **e2e harness (Playwright, dev-only dep).** `npm run test:gemini-e2e` drives
-  the REAL `content-main.js` in headless Chromium against a fake Gemini page
-  backed by the real gateway, proving the Stage-3 mechanics: capture-phase
-  intercept kills the original submit, redacted text is written+read
-  (model-sync), a synthetic re-submit fires and is NOT re-intercepted (loop
-  guard = exactly one gateway call + one send), zero raw PII leaves, and
-  gateway-down blocks the send. 8/8. Does NOT cover the real gemini.google.com
-  selectors or the SW/CORS plumbing end-to-end — those stay manual (Chrome).
-
-**Cursor per-turn CHAT logging — Phase M (2026-07-27):** The Traffic Inspector showed no
-prompt/output for Cursor (only counts-only `HOOK` rows) because Cursor chat never reaches
-the gateway. Fixed the same way Gemini was: replay each finished turn from the transcript
-**Cursor itself writes** — `transcript_path` is present in every hook payload (verified
-live; format `{"role":"user"|"assistant","message":{"content":[{"type":"text"|"tool_use"}]}}`
-plus `{"type":"turn_ended"}` markers). `scripts/cursor-turn-log-hook.mjs` (wired to `stop`,
-**fail-OPEN** — logging must never break a session) reads the new turns and POSTs raw text
-over loopback to `/log-turn`, which redacts and stores **redacted only**. Dedupe is a
-counts-only state file (`cursor-turnlog-state.json`) so a re-fire never double-logs; a
-failed post is retried on the next turn. Cursor's `<user_query>`/`<timestamp>` envelope is
-stripped so the row shows what the user actually typed. `/log-turn` gained a `provider`
-param — Cursor turns store as **`openai`** (its API family) because `Provider` is a FROZEN
-contract; the console labels `cursor-*` rows "cursor" for display. **Live-verified: 7 real
-turns rendered with prompt + assistant output.** Suite 121/121.
-- Also fixed: HOOK rows rendered *"(could not parse request — snapshot may be truncated;
- raise SNAPSHOT_CHARS)"*, which was misleading — audit entries store an EMPTY snapshot by
- design and raising `SNAPSHOT_CHARS` would change nothing. Now says so (`clean-view.ts`).
-- Also fixed: `tests/phase-l.test.ts` used `port + 1` as its "dead" port, which another
- parallel test file's gateway can occupy — real flake, exposed by adding a test file.
-
-**Turn-log dedupe broke on transcript COMPACTION — FIXED (2026-07-28):** Dedupe stored a
-COUNT of turns logged per transcript, which assumes the file only grows. Cursor **compacts**
-a long session (summarizes and rewrites the transcript in place), leaving the counter AHEAD
-of the content — found live at **17 logged vs 6 present** — so `turns.length <= already` was
-true forever and that session **silently stopped logging**. Caught only because a live audit
-test showed an empty traffic log. Dedupe is now **per-turn content hashes**
-(`{ logged: [sha256(prompt\0response)] }`, capped 500/transcript, hashes only — no text on
-disk), which survive a rewrite. A failed POST no longer records its hash, so the retry path
-is unchanged.
-- **The first fix still wedged on the REAL state** (caught by live testing, not the suite):
- migrating the legacy counter marked *every* remaining turn as logged and returned before
- persisting, so each run re-read the counter and re-wedged. Migration now clamps to
- `turns.length - 1` — the hook fires BECAUSE a turn just ended, so the newest turn must stay
- loggable — and state is persisted on **every** path, converting counter → hashes once.
-- Regressions: `tests/phase-m.test.ts` "compacted transcript keeps logging" and "legacy
- counter ahead of a compacted transcript still logs the newest turn". Suite 127/127.
-
-**Cursor QUEUED-MESSAGE bypass — FOUND LIVE, NOT FIXABLE, AUDITED (Phase N, 2026-07-27):**
-A message **queued while the agent is busy** is delivered to the model with **no
-`beforeSubmitPrompt` invocation at all** — not an allow, not a deny, the gate is never asked.
-Proved from `prompt-hook-shape.log`: the invocation count did **not move** across two queued
-sends, one carrying a real address, while Cursor's UI showed "2 Queued". A composer send
-while idle behaves correctly (hook fires, denies, and the message never enters the
-transcript). **No hook can close this** — no other Cursor hook carries prompt text
-(`sessionStart`/`beforeMCPExecution` don't see prompts, `preToolUse`/`postToolUse` are tool
-payloads, `stop` is after the answer), so a queued send is committed before our code runs.
-Also learned: the transcript does **not** contain queued messages while they're queued (it's
-written on delivery), so the §7.1 pending-message scan is blind to the queue — it only
-refuses *subsequent* sends once a denied message is already in history.
-- **Built instead: an audit trail.** `cursor-redact-hook.mjs` records a **SHA-256 hash** of
- every prompt it approves (`cursor-approved-prompts.json`, ring-capped 500 — hashes only, no
- prompt text on disk); `cursor-turn-log-hook.mjs` hashes each delivered message and sends
- `unchecked: true` to `/log-turn` when one has no matching hash. New optional
- `LogEntry.unchecked` (additive, same shape as `blocked`) renders as an `unchecked` pill,
- red when the row also has PII. **`unchecked` + `piiDetected` = a confirmed leak**, plus a
- loud stderr line. **An empty ledger flags nothing** (first install / cleared state can't be
- distinguished from a bypass; crying wolf on every historical turn is worse than no audit).
-- Cursor prompt coverage is therefore **block-on-composer-send, audit-on-queue**. The real
- fix is upstream — Cursor must invoke `beforeSubmitPrompt` on the drain path. Worth filing.
-- Full writeup: `CURSOR_INTEGRATION_PLAN.md` §7.3 (+ limitation #9). Suite 125/125.
-
-**Cursor AUTO-ATTACHED-FILE bypass — FOUND LIVE, NOT BLOCKABLE, AUDITED (Phase O, 2026-07-28):**
-A file the user has **OPEN or SELECTED** (no `@`-mention) is auto-inlined by Cursor into the
-request as an `<attached_files>` block — and that block is **not in the `beforeSubmitPrompt`
-payload**. Proved from `prompt-hook-shape.log` (12:32 test): the hook fired and **ALLOWED**
-with `ctx.prompt` = only the 32-char typed text and `attachments` = only `type:"rule"` refs
-(`CLAUDE.md`/`AGENTS.md`); the selected `pii-block-test.txt` (real email/SSN/card) was
-nowhere in `ctx`, yet the transcript's `<attached_files>` carried it and the model read it.
-So this is the **same wall as the queue bypass** — no prompt text, no file path, nothing to
-gate — and the `@`-mention fix (§7.1) can't catch it either (no `@token` to resolve). This is
-distinct from a queued send: the hook *does* fire, it just can't see the attachment.
-- **Worse, it was also INVISIBLE:** `cursor-turn-log-hook.mjs`'s `userMessage()` strips
- `<attached_files>` for display, and the stripped text was also what got scanned — so the
- console row read **"no PII"** on a real leak.
-- **Fix (visibility only — blocking stays impossible):** the turn-log hook now extracts
- `<attached_files>` blocks (`attachmentsOf`, **that tag ONLY** — a whole-message scan would
- hit Cursor's stamped `user_email` and flag every turn) and sends them as a new `scanExtra`
- field to `/log-turn`. The gateway redacts `scanExtra` to **count** its PII, folds those
- counts into `matchedRules.inbound` + `piiDetected`, and sets `entry.unchecked = true` when
- the attachment carried PII — **without storing or displaying the file dump** (counts-only,
- like the Phase L tool audit). Approval of the *typed* prompt does **not** clear the flag
- (the live bug: the typed text was allowed, the attachment still leaked). The clean view
- still shows only what the user typed.
-- Cursor prompt coverage is now **block-on-composer-send + `@`-mention; audit-on-queue +
- auto-attach**. The `unchecked` pill + PII = confirmed leak covers both unblockable paths.
- Real block-side fix is upstream (Cursor surfacing attachment content to `beforeSubmitPrompt`)
- or a Cursor setting to disable auto-include of open/selected files. `tests/phase-o.test.ts`.
- Suite 130/130.
-
-**Unblockable-leak desktop alert + upstream writeup (2026-07-29):** The `unchecked`+PII
-pill is easy to miss and neither path can be blocked, so a confirmed leak now also fires a
-**best-effort desktop notification** (`lib.mjs` `notifyDesktop`, macOS `osascript` / Linux
-`notify-send`, zero-dep, fail-open, **counts only — never the leaked text**), gated by the
-pure `isConfirmedLeak(turn, json)` in `cursor-turn-log-hook.mjs`. Suppress with
-`GATEWAY_NO_DESKTOP_NOTIFY=1` (set in the hook tests). `doctor` now prints a non-failing
-`[NOTE]` naming the two unblockable paths + the mitigation. Both Cursor feature requests are
-written up file-ready in **`CURSOR_UPSTREAM_REQUESTS.md`** (invoke `beforeSubmitPrompt` on
-queue-drain; surface auto-attached file content). `tests/leak-alert.test.ts` (3/3). Suite 133/133.
-
-**IPv6 loopback false positive — FIXED (2026-07-27):** The `IPV6` rule had no `validate`,
-so the literal `::1` was treated as PII. This **blocked editing this project's own
-`src/server.ts`** (its loopback-origin check cites `::1` in a comment) — the block hook is
-not just theoretical friction. `isPublicIpv6` now exempts loopback/unspecified, mirroring
-the `isPublicIpv4` carve-out that already existed for `127.0.0.1`. Real IPv6 addresses
-still redact; wall-clock `12:34:56` still untouched.
-
-**Cursor `@`-mention bypass — FOUND LIVE + FIXED (2026-07-27):** Attaching a file with
-`@name (1-6)` inlined its contents into the request with **both** hooks silent, so raw PII
-reached the model. Found by live testing, not by the suite: a file `beforeReadFile` had
-just blocked was delivered in full one message later via `@`. Cause (proved by a payload
-capture): `beforeReadFile` never fires (Cursor inlines the attachment — no agent file read
-happens), and `beforeSubmitPrompt` receives only the mention TEXT — its `attachments` array
-holds **only `type:"rule"` path refs** (`CLAUDE.md`/`AGENTS.md`), never the mentioned file,
-and no field carries content. Fix: `cursor-redact-hook.mjs` resolves `@`-tokens from
-`ctx.prompt` against `ctx.workspace_roots`, reads those files, and scans each via `/detect`;
-unresolvable tokens (`@Web`, `@Symbol`, missing files) are skipped and resolution stays
-inside a workspace root. **Do NOT "fix" this by scanning the whole hook payload** — Cursor
-stamps its own `user_email` (and a `transcript_path` containing it) on EVERY prompt, so a
-whole-stdin scan denies every message the user sends; per-field capture showed all fields
-clean except `user_email`. A test guards that trap. The hook also gained an **opt-in schema
-capture** (`touch ~/.secure-llm-gateway/hook-capture` → `prompt-hook-shape.log`) that logs
-key paths/types/string LENGTHS + per-field counts-only PII verdicts — **never raw payload**,
-unlike the Phase L capture — for re-checking the payload shape after a Cursor upgrade.
-Suite 121/121. Full writeup: `CURSOR_INTEGRATION_PLAN.md` §7.1.
-
-**Cursor architecture finding (2026-07-14):** Cursor CHAT cannot be routed through a
-loopback gateway — Cursor makes provider calls from its OWN cloud servers and bans
-private-network base URLs ("Access to private networks is forbidden"). Confirmed live
-(gpt-4o probe). So base-URL redaction (Phase J) is unshippable for Cursor chat; the shim
-stays valid for Claude Code / direct callers. Cursor coverage is therefore: block-if-PII
-(K) on prompts/file-reads + tool-data SCRUB (L) on preToolUse/postToolUse. Full writeup:
-`CURSOR_BLOCKER_REPORT.md`, `CURSOR_REDACTION_BRIEF.md`. Hook-capability correction: Cursor
-hooks are NOT all block-only — `preToolUse` (updated_input) and `postToolUse`
-(updated_mcp_tool_output) CAN rewrite; the prompt/file hooks we use are block-only.
-
-**`/models` root-path fix (2026-07-13):** `/models` handler now matches both `/openai`-
-prefixed and bare-root paths (`^/(?:openai/)?(?:v1/)?models$`) — a bare-root Cursor base URL
-404'd validation while chat worked at root. Regression in `tests/phase-j.test.ts`.
-
-**`configure-cursor` merge bug FIXED (2026-07-14):** now writes our MCP entry as a fresh
-HTTP-only object (replace, not deep-merge), so a prior stdio-shaped entry leaves no stale
-`command`/`args`/`envFile` keys; other servers preserved. Regression in `tests/phase-i.test.ts`.
-
-**Operational bootstrap (verified 2026-07-10):** The single bootstrap command is
-`node scripts/gateway-service.mjs install` — it registers the per-user service, runs
-`configure-clients` (global `~/.claude/settings.json`: `ANTHROPIC_BASE_URL` + SessionStart
-hook + user-scope `secure-gateway` MCP; `~/.cursor/mcp.json` + `hooks.json`), and starts
-fail-closed. **No runtime deps to install** (zero-dep is a hard constraint; the only
-`npm install` is dev-only `typescript`/`@types/node` for `npm run build`). Verified live:
-gateway healthy on `127.0.0.1:8000`, `doctor` 11/11 `[OK]`, Claude+Cursor hooks present,
-outbound `EMAIL` redaction confirmed end-to-end from a real Claude Code prompt. See
-DEVELOPERS.md §0 Quickstart.
-
-**~~Known bug~~ FIXED — `configure-cursor` merge (fixed 2026-07-14):** `configure-cursor`
-used to deep-merge into an existing `secure-gateway` entry, leaving stale stdio
-`command`/`args`/`envFile` keys beside the new `type: http` + `url` when migrating from the
-removed `mcp-remote-bridge.mjs`. Now writes our entry as a fresh HTTP-only object (replace,
-not merge); other servers preserved. Regression test in `tests/phase-i.test.ts`.
-
-**Loopback-only (2026-07-10):** All remote/cloud (Render) support was removed. The
-gateway binds `127.0.0.1` only — `loadConfig` throws on any non-loopback `GATEWAY_HOST`
-(no `GATEWAY_REMOTE`, no `0.0.0.0`, no `RENDER` detection). Deleted `render.yaml` and
-`scripts/mcp-remote-bridge.mjs`; dropped `--remote-url`/`init-env` and the
-`GATEWAY_PUBLIC_URL`/`GATEWAY_MCP_TOKEN` plumbing. Clients connect over loopback:
-Claude via `ANTHROPIC_BASE_URL=http://127.0.0.1:8000` + `http` MCP, Cursor via `http`
-MCP. Control plane is loopback-Origin gated (`GATEWAY_ADMIN_TOKEN` still allows a
-cross-origin caller).
-
-**Redaction expansion (2026-07-10):** Default rules grew beyond the original 7 to cover
-high-signal Claude-session leaks — JWT, PEM private keys, DB/URL userinfo, expanded
-API key families, US/+91 phones, Indian PAN + Verhoeff Aadhaar — with FP guards
-(no bare 10-digit, no invalid Aadhaar, wall-clock untouched).
-
-**Global client config fix (2026-07-10):** `scripts/gateway-service.mjs configure-clients`
-now writes user-level Claude Code and Cursor configuration (`~/.claude/settings.json`,
-`~/.cursor/mcp.json`, `~/.cursor/hooks.json`) so new repos inherit the gateway setup.
-Cursor hooks use `scripts/cursor-gateway-hook.mjs` with fail-closed
-`sessionStart`/`beforeMCPExecution` only; repo-local `.cursor/mcp.json` and
-`.cursor/hooks.json` are no longer needed. Loopback `127.0.0.1` is preserved in
-redacted hook messages, while public IPv4 addresses still redact.
-
-**Ops + connection hardening (2026-07-10):** Unified Claude SessionStart on
-`claude-session-hook.mjs` (start + fail-closed health). `gateway-service` adds
-`restart`/`--force`, installId-aware health, stop-by-port. StreamRedactor scrubs
-`thinking_delta`. `/api` POST mutations require `GATEWAY_ADMIN_TOKEN` when set.
-
-**JWT rule fix (2026-07-10):** Payload no longer required to start with `eyJ`
-(catches short payloads like `e30`); signature allows optional `=` padding. Added
-multi-JWT and split-stream tests.
-
-**Cursor real redaction — Phases J + K (2026-07-13):** Cursor now gets full
-bidirectional redaction of chat/agent traffic (not just MCP inspection). Design
-decisions worth remembering:
-- **Single endpoint, model-name routing (NOT two endpoints).** Cursor exposes ONE
-  global "Override OpenAI Base URL", so a second gateway path can never be reached
-  alongside the first from one Cursor install. Point Cursor's OpenAI base URL at
-  `http://127.0.0.1:8000/openai`; the proxy branches on the request's `model` id:
-  a `claude-*` id or a configured alias (`CURSOR_TRANSLATE_MODELS`, default
-  `claude-via-gateway`) → translate to the Anthropic Messages API and forward to
-  Claude; any other model → pass through to OpenAI unchanged. See
-  `shouldTranslate()` in `src/openai-anthropic-shim.ts` and the decision block in
-  `src/proxy.ts`.
-- **Translation shim** (`src/openai-anthropic-shim.ts`): `openaiToAnthropicRequest`,
-  `anthropicToOpenAIResponse`, and `AnthropicToOpenAISSE` (streaming reframer that
-  runs AFTER the existing StreamRedactor, so split-PII holdback is reused). Redaction
-  engine untouched — it scrubs whatever body is present. Auth swap: client's OpenAI
-  bearer dropped, server-side `ANTHROPIC_API_KEY` + `anthropic-version` added (real
-  key never touches the client). Model map `CURSOR_MODEL_MAP` resolves alias → real
-  Claude id; `CURSOR_DEFAULT_MODEL` / `CURSOR_MAX_TOKENS` fill gaps.
-- **Model-policy ordering fix:** the block check now runs on the RESOLVED Claude
-  model, so a blocked Claude model can't slip through under an OpenAI alias.
-- **Hooks are block-only (Phase K).** Cursor's `beforeReadFile`/`beforeTabFileRead`/
-  `beforeSubmitPrompt` can only allow/deny — they CANNOT rewrite content (verified
-  against cursor.com/docs/hooks). `scripts/cursor-redact-hook.mjs` DETECTS PII via
-  `POST /detect` (loopback-gated, uses the live rule set, never logs raw text) and
-  DENIES when found; fail-closed on any error. Tab autocomplete file *reads* can be
-  blocked but not scrubbed; Apply-from-Chat is uncoverable (Cursor's own backend).
-- **Test note:** Phase K tests must spawn the hook with async `spawn`, not
-  `spawnSync` — `spawnSync` blocks the parent event loop and deadlocks the
-  in-process gateway serving `/detect`.
-- Full rationale + limitations: `CURSOR_INTEGRATION_PLAN.md`.
-
-**Cursor model-validation fix (2026-07-13):** Cursor validates a custom model by
-`GET`ting `/v1/models` on its "Override OpenAI Base URL". That GET has no body, so
-the shim can't route it, and it was proxied to real OpenAI → 401 on the dummy key →
-Cursor reported *"Model name is not valid: claude-via-gateway"* and blocked the chat
-before any translate request was sent. `src/server.ts` now answers
-`GET /openai/(v1/)?models` locally with a synthetic OpenAI model list built from
-`config.cursorTranslateModels` (loopback bind, no secrets). Regression test added to
-`tests/phase-j.test.ts`. Suite 88/88.
-
-**Cursor model-echo fix (2026-07-13, the actual "not valid" root cause):** After the
-`/models` fix, Cursor *still* reported *"Model name is not valid: claude-via-gateway"*
-on send. Real cause: the translate response echoed the RESOLVED Claude id
-(`claude-sonnet-5`) in the OpenAI `model` field, but OpenAI-compatible clients validate
-a custom model by matching the returned `model` against what they SENT. `src/proxy.ts`
-now echoes the client's requested id (`clientModel`, the alias) in both the non-stream
-`anthropicToOpenAIResponse` and the `AnthropicToOpenAISSE` reframer; the resolved id is
-still used for policy checks, forwarding, and log entries. Verified live: request
-`model:"claude-via-gateway"` → response `model:"claude-via-gateway"`, forwarded body
-`model:"claude-sonnet-5"`.
-- **Reverted a bad prior workaround:** `DEFAULT_CURSOR_TRANSLATE_MODELS` had been
-  changed to `["claude-via-gateway", "gpt-4o"]` on the wrong theory that Cursor rejects
-  invented names before calling the base URL. That hijacked genuine `gpt-4o` to Claude
-  and broke the Phase-J pass-through test. Restored to `["claude-via-gateway"]`. The
-  echo fix — not a gpt-4o alias — is the correct solution. Suite 88/88.
-
-**Cursor `/models` root-path fix (2026-07-13, "not valid" recurrence):** The
-`/models` handler only matched `^/openai/(v1/)?models$`. When Cursor's "Override
-OpenAI Base URL" is set to the bare gateway root (`http://127.0.0.1:8000`, no
-`/openai` segment), model validation GETs `/v1/models` at root → 404, while chat
-POSTs at root (`/v1/chat/completions`) route to the shim and work — asymmetric, so
-Cursor reports *"Model name is not valid: claude-via-gateway"* on send even though
-the translate path is healthy. `src/server.ts` regex broadened to
-`^/(?:openai/)?(?:v1/)?models$` so both root and `/openai`-prefixed probes answer
-locally. Regression test in `tests/phase-j.test.ts`. Suite 89/89.
-
+> **Historical fix notes** — every dated writeup (Phases G–T, all the live-debugging narratives) —
+> were moved to [`LEDGER_HISTORY.md`](LEDGER_HISTORY.md) on 2026-08-03 to keep this operating manual
+> lean. Append new dated notes there, not here. The phase tables below remain the living gate record.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|
@@ -623,7 +279,14 @@ Two other same-day fixes that made the above hold: the **generation-wait** fix (
 | G-Reply — Selector-free assistant-reply capture (obfuscated panels) | ✅ Done 2026-07-29 (live per-surface check pending) | happy: streamed reply captured on a rotating-class panel, chip NOT logged (both anchor strategies) / failure: chips-only or no anchor → BLANK response, never a guess / edge: a previous turn's reply (and a hidden one) is never paired with this prompt | ✅ 8/8 (141/141) | `response-finder.js` (pure scorer) + `response-capture.js` (DOM walk, anchored on the submitted text, text-node fast path for Gmail-sized DOMs). Fixes Gmail/Drive/Chat showing "(none)" as assistant output; semantic selectors still run first so Gemini web/Docs/Sheets/Slides are unchanged. `CONFIG.settleMs`/`turnTimeoutMs` now tunable. Browser e2e `npm run test:gemini-response-e2e` (not run here — no chromium binary). `tests/phase-gemini-response.test.ts`, `WORKSPACE_COVERAGE.md` §5.7. |
 | G-Workspace — Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) | ✅ Live-verified 2026-07-21 | live: Docs + Gmail + **Sheets** + Chat network-proven (raw→zero matches; token in streamGenerate/create_message) / Enter-key path works (not just the ↑ arrow) / tripwire `shouldInspectUrl` covers `streamGenerate` | ✅ 116/116 + live | **Additive, gemini.google.com untouched.** `manifest.json` +Workspace hosts (mail/docs/drive/chat) in both match arrays; `composer.js` +`div[contenteditable][aria-label*="Ask Gemini" i]` selector (appsElements, NOT Quill — top-level DOM, not shadow/iframe); `content-main.js` `fireSubmit` now picks the **enabled+visible** send button (Workspace renders a **disabled decoy** `aria="Submit"` beside the real one) and dispatches a **full pointer sequence** (Gm3 Material buttons ignore a bare synthetic click); `tripwire.js` `DEFAULT_GEMINI_ENDPOINTS` +`streamGenerate`/`appsgenaiservice` (Workspace endpoint is lowercase, on appsgenaiservice host). **Selector-order fix (Sheets):** the `aria*="Ask Gemini"` selector must precede the generic `role=textbox`/`textarea` catch-alls in `composer.js` — Sheets' empty stray `role=textbox` boxes were hijacking `findComposer` → `readText`="" → send went out unredacted; reorder fixed it (Quill still first, gemini web unaffected). `content-main.js` has `CONFIG.debug` tracing in `onSubmitEvent` (off) that pinpointed it. Shared panel → one fix covers all five apps. **Drive: in manifest but still untested.** |
 | X-Browser — Firefox port | ✅ gemini.google.com done; ⚠️ Workspace panels fail-closed | happy: real Firefox + real add-on + real gateway sends a redacted token, zero raw PII, exactly one send / failure: gateway unreachable → nothing sent + user told + no raw PII on the page / edge: MAIN-world module loads under a gemini-like `nonce`+`strict-dynamic` CSP, and background runs as an event page with no manifest warnings | ✅ 12/12 + 156/156 | `src/browser-api.js` (`chrome` before `browser` — `browser.*` is promise-only), `background.scripts` event page (no MV3 SW, bug 1573659), `cloneInto` for Gecko compartment isolation, config re-publish race fix. Harness: `firefox-rdp.mts` + `firefox-marionette.mts`. **gemini.google.com live-verified 2026-07-30** (redaction + real-reply capture, 3 turns, = Chrome). **FIREFOX WORKSPACE-PANEL LIMITATION (found live 2026-07-30):** in the Docs/Sheets/Gmail/Drive/Chat "Ask Gemini" panels (a plain Angular contenteditable, not Quill) Firefox does not sync our redacted `writeText` into Gemini's model — it XHRs the RAW PII, the **G4 tripwire aborts it** (`tripwire: raw PII in outgoing XHR body — aborting`), Gemini shows "Something went wrong". **NO LEAK — fail-closed holds**, but a PII message can't be sent from a Firefox Workspace panel (non-PII messages work). A `beforeinput`/`input`-rewrite of `writeText` was tried and did NOT make the Firefox Workspace model sync; reverted rather than ship an unproven change on the redaction path. gemini.google.com (Quill) unaffected. Chrome Workspace panels unaffected. |
+| P — ChatGPT surface (chatgpt.com) | ✅ Done 2026-07-30 — **live-verified in Chrome AND Firefox (all 14 rules on the wire)** | happy: token on the wire from a ProseMirror composer, exactly one send + one `/redact`, turn logged `openai`/`chatgpt-web-extension` with model + reply / failure: gateway down ⇒ blocked, and a DESYNCED editor ⇒ tripwire abort (no raw PII) / edge: host scoping — a Gemini `ql-editor` decoy on the page never wins, a `<textarea>` is never the composer target, ChatGPT endpoints don't inspect Gemini's and vice-versa | ✅ 8/8 (161/161) + e2e 17/17 | **Zero gateway change; Gemini path functionally untouched.** New `extension/src/site-adapter.js` = hostname-keyed selectors/endpoints/log-labels; `composer.js`/`content-main.js`/`tripwire.js` are now site-agnostic. Logs as `provider:"openai"` (FROZEN enum untouched). **The ProseMirror write was proven on the live wire BEFORE building** — the existing `execCommand("insertText")` syncs; the hidden companion `textarea` and a synthetic `paste` both ship raw (see § note). `tests/phase-chatgpt.test.ts`, `npm run test:chatgpt-e2e`, `extension/CHATGPT_COVERAGE.md`. **Firefox works too** — the reported Firefox breakage was a stale `extension/build/firefox` (host not matched ⇒ unprotected, not fail-closed), now guarded by a staleness test in `tests/phase-cross-browser.test.ts`; CSP + ProseMirror-sync both probed clear on the real page (`probe:firefox-chatgpt`). |
+| Q — File-upload guard (ChatGPT) | ✅ Live-verified 2026-07-30 | happy: a PII text file uploads as tokens, no raw PII, page keeps the original filename / failure: an unscannable PDF and a gateway-down text file are never uploaded + the user is told why / edge: a clean file's bytes are unchanged, and a raw upload that bypassed the DOM guard is aborted by the tripwire | ✅ 4/4 unit (166/166) + chatgpt e2e 31/31 | Probe-driven (`upload-probe-console.js`, metadata only): bytes leave at **ATTACH time, ~19s before send**, as an XHR PUT of the `File` to a **region-specific** `*.oaiusercontent.com` host. `src/upload-core.js` (pure) + `src/upload-guard.js` (capture-phase kill-and-re-fire, clears the input) + tripwire backstop (defers `send()` for the async Blob read). **Unscannable formats BLOCKED** — so a pasted screenshot is blocked, intended. Binary extension beats a text MIME type. **Live-verified on real chatgpt.com:** the 14-type sample uploaded as placeholder tokens (ChatGPT said so itself), exactly one upload per attach, Initiator `tripwire.js:209`; a PDF carrying PII was refused with `binary-extension` and never uploaded. **Gemini uploads probed + armed 2026-08-03** — Blob POST to `push.clients6.google.com/upload/` (attach-time, guard-supported shape); endpoint pinned to `clients6.google.com`+`/upload/`. Covers gemini.google.com; the Workspace-panel upload endpoint is still unprobed, so the attach-time guard scrubs there but the wire backstop doesn't yet cover it. `tests/phase-upload.test.ts`, `extension/CHATGPT_COVERAGE.md` §6. |
+| R — Office-file scrubbing (zip+XML) | ✅ Live-verified 2026-07-30 (synthetic docx; real Word doc untried) | happy: PII split across Word runs is concatenated, redacted and written back / failure: XML entities survive the round trip, and a redaction that doesn't line up paragraph-for-paragraph THROWS instead of scattering text / edge: only text-bearing parts are touched, legacy .doc/.xls/.ppt stay blocked, and the rebuilt archive passes the system `unzip -t` | ✅ 7/7 (173/173) + chatgpt e2e 36/36 | DOCX/XLSX/PPTX are ZIP+XML, so `DecompressionStream`/`CompressionStream` (built-ins) make a real SCRUB possible — the file is cleaned and sent, not refused. `src/zip.js` + `src/ooxml.js`. Word splits words across runs, so text is concatenated **per paragraph** before scanning; only changed paragraphs are rewritten. Paragraphs join with NUL (illegal in XML ⇒ unambiguous split). Also added `uploadPolicy:"warn"` escape hatch (upload + `unchecked` audit row at attach time) with `block` still the default. **Live-verified on real chatgpt.com:** ChatGPT reported placeholders for the email/SSN/card (all split across runs) with the clean paragraph unchanged — and its own parser read our REBUILT archive. **Still untried: a document straight out of Word/Google Docs.** `tests/phase-ooxml.test.ts`, `extension/CHATGPT_COVERAGE.md` §6.1b. |
+| S — Grok surface (grok.com) | ✅ Done 2026-07-31 — **live-verified on real grok.com (Chrome), all 14 rules on the wire via the mouse-click send path** | happy: token in the `message` field on the wire from a Tiptap/ProseMirror composer, exactly one send + one `/redact`, turn logged `openai`/`grok-web-extension` with the tier model and a reply recovered by SHAPE / failure: gateway down ⇒ blocked, and a DESYNCED editor ⇒ tripwire abort (no raw PII) / edge: host scoping — a Gemini `ql-editor` decoy never wins, `<textarea>` is never the composer, x.com is not claimed, Grok/ChatGPT/Gemini endpoint lists don't inspect each other, and clicking Grok's UNLABELED submit button is still intercepted | ✅ 5/5 (178/178) + e2e 21/21 | **Zero gateway change; adapter-only apart from ONE shared-code fix.** Grok = Tiptap = ProseMirror, so ChatGPT's proven `execCommand` write is reused as-is. New `GROK_ADAPTER`; logs `provider:"openai"` + `source:"grok-web-extension"` (FROZEN enum untouched). The shared-code fix: Grok's send button is an **unlabeled `button[type="submit"]`**, so `content-main.js` now UNIONs the site's `liveSendSelector` into the click filter — without it a click sends raw, the tripwire aborts, and the message silently fails (fail-closed, not a leak; confirmed by reverting the fix). `responseSelectors` deliberately **empty** ⇒ shape-based capture. **LIVE-VERIFIED 2026-07-31:** all 14 rules tokenised in one turn sent BY MOUSE CLICK, Grok itself reported the fields "were already redacted before they reached me", and a cross-request search for the raw address across 159 requests found nothing. Firefox on Grok still untried. `tests/phase-grok.test.ts`, `npm run test:grok-e2e`, `extension/GROK_EXTENSION.md`. |
+| T — DeepSeek surface (chat.deepseek.com) | ✅ Done 2026-08-03 — **fully live-verified (text + upload scrub + label)** | happy: chat.deepseek.com resolves to the DeepSeek adapter, tier label → log slug, a turn logs `openai`/`deepseek-web-extension` with only redacted text / failure: a READABLE raw body on `/chat/completion` is aborted (mechanism wired) + the composer selectors target a `<textarea>` and never a contenteditable / edge: the four surfaces share no selectors or endpoint fragments, reply read by `.ds-markdown`, upload guard ARMED (probed FormData POST to `/file/upload_file`, telemetry excluded) | ✅ 5/5 (188/188) | **Adapter-only — ZERO shared-code change** (the first surface needing none: the textarea write path already existed for the Workspace composers). The EASIEST composer — probed live as a plain `<textarea>` (`isTextarea:true`, no ProseMirror/Lexical) — so `writeText`'s native-setter+input path handles it. The WEAKEST backstop: DeepSeek **ENCRYPTS the request body** (WASM proof-of-work — a Network search for the typed text found NOTHING, `create_pow_challenge`+`sha3_wasm` present), so the **tripwire is BLIND** on this surface (it can't read ciphertext). Redaction still holds — the textarea is scrubbed before DeepSeek encrypts it — but the fail-closed net can't verify the wire, so the **primary intercept is the sole protection** and the live textarea-write check is MANDATORY before trusting it. Send endpoint `POST /api/v0/chat/completion` (tripwire fragment `/chat/completion`, survives the `/completions` plural). Reply via `.ds-markdown` + shape fallback. Logs `provider:"openai"` + `source:"deepseek-web-extension"` (FROZEN enum untouched). **Live verification on real chat.deepseek.com still pending.** `tests/phase-deepseek.test.ts`, `extension/DEEPSEEK_EXTENSION.md`. |
+| S-Upload — Grok file-upload guard | ✅ Done 2026-07-31 — **LIVE-VERIFIED on real grok.com (text + `.docx` scrubbed, PDF refused)** | happy: a PII text file is uploaded as tokens in a multipart body, no raw PII, page keeps the filename, and the `File` the page is HANDED is already redacted (so no raw copy ever exists for it to send) / failure: an unscannable PDF (text MIME, binary extension) and a gateway-down text file are never uploaded + the user is told why / edge: a clean file's bytes are unchanged, and a raw MULTIPART upload that bypassed the DOM guard is aborted by the tripwire | ✅ 5 unit (183/183) + grok e2e 67/67 (46 new: upload, drag-and-drop, mixed multi-file, `uploadPolicy:"warn"`) + chatgpt e2e 36/36, gemini 15/15, response 8/8 unchanged | Probed first (§ note above): bytes leave **35ms after attach** (ChatGPT: 259ms), ~24s before the send, as **multipart FormData** POSTed with **fetch** to `grok.com/http/upload-file-v2/direct` — same-origin, so no region-suffix trick needed. **The attach-time DOM guard needed no change** (it swaps a redacted `File` into `input.files`, and the page builds its own body from that). Two backstop gaps closed: `isBinaryBody` (Blob-only) → `uploadBlobsOf` which unpacks multipart and returns **all** file parts; and the backstop existed on **XHR only**, so Grok's fetch upload had no wire-level net at all — `tripwire.js` gained a fetch branch. An e2e false pass was caught en route (fixture posted to a relative path ⇒ `{host:"grok.com"}` never matched ⇒ the bypass test "passed" without exercising the backstop). `tests/phase-upload.test.ts`, `npm run test:grok-e2e`. **Live-verified on real grok.com 2026-07-31 and it is the strongest upload evidence yet — Grok printed both files back verbatim rather than summarising:** `pii-sample.txt` came back with **all 14 rules fired** ("All the sensitive values appear to be redacted"), and `upload-office-test.docx` came back with the email/SSN/card (each **split across Word runs**) redacted and the clean paragraph unchanged — so **xAI's parser also read our REBUILT archive**, a second independent consumer after OpenAI's. A PDF could not be attached at all (`binary-extension`), as intended. **Drag-and-drop coverage added 2026-07-31 (grok e2e 46/46) — the first automated drop coverage on ANY surface**, incl. the re-fired `DragEvent` having to bubble back to the page's handler; mutation-checked by neutering the drop listener (6/10 fail). That check also proved the tripwire independently aborts a raw *text* drop, but **cannot** see a real binary PDF, so the attach-time guard remains the only defence for unscannable formats. **Drop then LIVE-VERIFIED on real grok.com in Chrome the same day — the first live drop check on Chrome on any surface** (ChatGPT's was Firefox-only): a file dragged in from Finder came back with all 14 types tokenised, which is the part the harness cannot prove (its `DragEvent` is page-constructed, not a trusted OS drag). **A mixed `.txt`+`.docx` attach was live-verified the same day** and is now covered too — the two kinds take different reassembly branches (rebuilt `File` vs replacement text), plus order preservation and all-or-nothing. That test had to `readZip` the uploaded archive: grepping the deflated body as text would have passed even on an unscrubbed docx. |
 | X-Browser — Safari port | ⚠️ Packaged, NOT verified | n/a — could not build or run | n/a | `npm run ext:build:safari` produces the package, but `xcrun safari-web-extension-converter` needs full Xcode (only CLT installed here), so **loopback fetch is unverified**. Safari-specific choices already made: event page only (MV3 SW enforces CORS on extension fetches), scheme-based extension origin (GUID rotates), `storage.managed` → `local`. Needs: App Sandbox network-client entitlement + macOS Local Network permission. Fail-closed intact if loopback is blocked. |
+| U — Admin dashboard (control plane) | ✅ Done 2026-08-04 — zero-dep; **login + 8 tabs live-verified in Safari**; enforcement wired (extension reads /internal/config; live block-check pending) | auth: seeded admin logs in + JWT opens a protected route / wrong password 401 + 6th attempt/min rate-limited (429) / tampered + expired JWT rejected. events: `/internal/events`→analytics / malformed body still 202, never blocks / **no raw PII persisted** — a value sneaked into `pii_types` is dropped. controls: surface mode PUT→`/internal/config` + audit row / **Cursor→redact 400** (block/allow only) / audit append-only, disabled surface reflected | ✅ 9/9 (197/197) | **Zero runtime deps** (rejected the prompt's React/Vite/Tailwind/recharts/bcrypt/npm-sqlite stack — violates §2). `node:sqlite` DB, `node:crypto` scrypt + HMAC JWT (8h), server-rendered HTML + inline-SVG dashboard mirroring `console.ts`. New `src/admin-{store,auth,api,console}.ts` + `scripts/admin-seed.ts`. Wired into the EXISTING process: `GET /admin` + `/admin/api/*` (JWT) + `/internal/*` (loopback) in `server.ts`; a single `trafficLog` `onPush` listener (`traffic-log.ts`) emits one analytics event per decision (**metadata only** — surface/decision/PII-type-names/latency) so every already-logging surface lights up with no decision-site edits. Global PII-type toggle drives the live engine (`setRuleEnabled`). `adminEnabled` defaults OFF under `--test` so unrelated test servers don't touch the real `~/.secure-llm-gateway/admin.db`. Run: `npm run admin:seed` then `http://127.0.0.1:8001/admin`. **8 tabs**: Analytics, AI Controls, Rules, Allowlist, Model Policy, Traffic, Try Redaction, Audit — the console-mirror tabs reuse `handleControlApi`/traffic-log/`redactText` behind the JWT (console mutations audited). **ENFORCEMENT WIRED (2026-08-04):** the extension SW serves `GET /internal/config/:surface` to `content-main.js`, which on a real send enforces the admin policy BEFORE redacting — `mode:block`/disabled ⇒ block ALL sends on that site (gemini web+Workspace / chatgpt / grok / deepseek), `mode:off` ⇒ raw allowed, `redact` ⇒ normal; polled ~15s. Claude Code/SDK restricted via Model Policy (proxy 403). Analytics already covers every surface (proxy + each `/log-turn` push feeds the listener). `tests/phase-admin.test.ts` (12), `ADMIN_DASHBOARD.md`. |
 
 
 **Status legend:** ⬜ Not started · 🟡 In progress · 🔴 Tests red (gate closed) · ✅ Done (gate green)

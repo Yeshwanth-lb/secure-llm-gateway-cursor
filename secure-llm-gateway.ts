@@ -66,6 +66,10 @@ export { createGatewayServer } from "./src/server.ts";
 export { INSPECTOR_HTML } from "./src/inspector.ts";
 export { CONSOLE_HTML } from "./src/console.ts";
 export { handleControlApi, isApiPath } from "./src/control-api.ts";
+export { isAdminPath, handleAdminApi } from "./src/admin-api.ts";
+export { openAdminStore, surfaceOf, modesForSurface, SURFACES } from "./src/admin-store.ts";
+export { hashPassword, verifyPassword, signJWT, verifyJWT, resetLoginRate } from "./src/admin-auth.ts";
+export { ADMIN_HTML } from "./src/admin-console.ts";
 export { cleanEntry, extractUserPrompt, extractAssistantOutput } from "./src/clean-view.ts";
 export {
   listModelPolicies,

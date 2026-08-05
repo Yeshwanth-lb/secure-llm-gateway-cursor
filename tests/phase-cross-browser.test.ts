@@ -155,28 +155,76 @@ test("failure: only the Firefox manifest carries gecko settings, and neither por
 test("edge: the shim is injected before the scripts that read it, and the packager emits a loadable tree", async () => {
   const chrome = JSON.parse(await readFile(CHROME_MANIFEST, "utf8"));
   // content-bridge.js and loader.js are classic content scripts that cannot
-  // import, so they read the shim off globalThis — it MUST run first.
-  assert.deepEqual(chrome.content_scripts[0].js, [
-    "src/browser-api.js",
-    "src/content-bridge.js",
-    "src/loader.js",
-  ]);
+  // import, so they read the shim off globalThis — it MUST run first. Checked for
+  // EVERY entry: adding a surface (ChatGPT) adds an entry, and one with the shim
+  // out of order would break only that surface.
+  for (const entry of chrome.content_scripts) {
+    assert.deepEqual(entry.js, ["src/browser-api.js", "src/content-bridge.js", "src/loader.js"]);
+  }
 
   const out = await mkdtemp(join(tmpdir(), "cross-browser-test-"));
   try {
     await buildExtension("firefox", { out });
     const built = JSON.parse(await readFile(join(out, "manifest.json"), "utf8"));
     assert.deepEqual(built.background.scripts, ["src/background.js"]);
-    // Every file the manifest names must actually be in the package.
-    const named = [
-      ...built.content_scripts[0].js,
-      ...built.web_accessible_resources[0].resources,
-      ...built.background.scripts,
-    ];
-    for (const file of named) {
+    // Every file the manifest names must actually be in the package — across all
+    // entries, so a resource only the ChatGPT entry lists still has to ship.
+    for (const file of namedFiles(built)) {
       await readFile(join(out, file), "utf8"); // throws if the copy step missed it
     }
   } finally {
     await rm(out, { recursive: true, force: true });
   }
+});
+
+/** Every packaged file a manifest refers to, across all entries. */
+function namedFiles(manifest: any): string[] {
+  return [
+    ...manifest.content_scripts.flatMap((c: any) => c.js),
+    ...manifest.web_accessible_resources.flatMap((w: any) => w.resources),
+    ...(manifest.background.scripts ?? [manifest.background.service_worker]),
+  ];
+}
+
+// A generated package under extension/build/<target> is what you actually load
+// into Firefox/Safari, and NOTHING else regenerates it — so it silently rots the
+// moment src/ or the Chrome manifest changes. That is not hypothetical: adding
+// ChatGPT left a stale extension/build/firefox whose manifest didn't match
+// chatgpt.com and which had no site-adapter.js, so the add-on never injected on
+// that host at all. Because no content script ran there, neither the interceptor
+// NOR the tripwire was present — the page was simply unprotected, which is the
+// one failure mode this project treats as unacceptable (it is not fail-closed).
+// The build dir is gitignored, so this only asserts "if you built it, it is
+// current" and skips when nothing has been built.
+test("failure: an out-of-date generated package is detected (stale build = unprotected surface)", async () => {
+  let checked = 0;
+  for (const target of Object.keys(TARGETS)) {
+    const dir = join(process.cwd(), "extension", "build", target);
+    const onDisk = await readFile(join(dir, "manifest.json"), "utf8").catch(() => null);
+    if (onDisk === null) continue;
+    checked++;
+
+    const out = await mkdtemp(join(tmpdir(), `cross-browser-stale-${target}-`));
+    try {
+      await buildExtension(target, { out });
+      const fresh = JSON.parse(await readFile(join(out, "manifest.json"), "utf8"));
+      assert.deepEqual(
+        JSON.parse(onDisk),
+        fresh,
+        `extension/build/${target}/manifest.json is STALE — run: npm run ext:build:${target}`,
+      );
+      // The manifest can match while the copied sources are old (the stale build
+      // was missing a whole module), so compare the packaged files too.
+      for (const file of namedFiles(fresh)) {
+        const [want, got] = await Promise.all([
+          readFile(join(out, file), "utf8"),
+          readFile(join(dir, file), "utf8").catch(() => null),
+        ]);
+        assert.equal(got, want, `extension/build/${target}/${file} is missing or STALE — run: npm run ext:build:${target}`);
+      }
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  }
+  console.log(`      (checked ${checked} generated package(s))`);
 });

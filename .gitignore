@@ -32,3 +32,15 @@ htmlcov/
 
 # Generated PII test fixture (regenerate via scripts/gen-pii-sample.mjs) — never commit PII-shaped data
 pii-sample.txt
+
+# Admin control-plane data (Phase U) — local SQLite DB + JWT signing key, never commit
+*.db
+*.db-wal
+*.db-shm
+jwt.key
+
+# Local screenshots + throwaway upload/PII test fixtures (regenerate as needed)
+Screenshot *.png
+pii-block-test.txt
+upload-block-test.pdf
+upload-office-test.docx

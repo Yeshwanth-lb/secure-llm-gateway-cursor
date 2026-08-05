@@ -1,11 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Gemini PII Redaction (local gateway)",
-  "version": "0.1.0",
-  "description": "Best-effort, fail-closed PII redaction for gemini.google.com. Rewrites prompts through the local redaction gateway before they leave the browser. One-way: values are not restored.",
+  "name": "Gemini + ChatGPT + Grok + DeepSeek PII Redaction (local gateway)",
+  "version": "0.4.0",
+  "description": "Best-effort, fail-closed PII redaction for gemini.google.com, the Google Workspace Gemini panel, chatgpt.com, grok.com, and chat.deepseek.com. Rewrites prompts through the local redaction gateway before they leave the browser. One-way: values are not restored.",
   "minimum_chrome_version": "111",
-  "permissions": ["storage"],
-  "host_permissions": ["http://127.0.0.1:8001/*", "http://127.0.0.1:8000/*"],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8001/*",
+    "http://127.0.0.1:8000/*"
+  ],
   "background": {
     "service_worker": "src/background.js",
     "type": "module"
@@ -19,10 +24,54 @@
         "https://drive.google.com/*",
         "https://chat.google.com/*"
       ],
-      "js": ["src/browser-api.js", "src/content-bridge.js", "src/loader.js"],
+      "js": [
+        "src/browser-api.js",
+        "src/content-bridge.js",
+        "src/loader.js"
+      ],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/browser-api.js",
+        "src/content-bridge.js",
+        "src/loader.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://grok.com/*"
+      ],
+      "js": [
+        "src/browser-api.js",
+        "src/content-bridge.js",
+        "src/loader.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://chat.deepseek.com/*"
+      ],
+      "js": [
+        "src/browser-api.js",
+        "src/content-bridge.js",
+        "src/loader.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -35,6 +84,11 @@
         "src/composer-learn.js",
         "src/response-capture.js",
         "src/response-finder.js",
+        "src/site-adapter.js",
+        "src/zip.js",
+        "src/ooxml.js",
+        "src/upload-core.js",
+        "src/upload-guard.js",
         "src/tripwire.js"
       ],
       "matches": [
@@ -43,6 +97,67 @@
         "https://docs.google.com/*",
         "https://drive.google.com/*",
         "https://chat.google.com/*"
+      ]
+    },
+    {
+      "resources": [
+        "src/content-main.js",
+        "src/interceptor-core.js",
+        "src/composer.js",
+        "src/composer-finder.js",
+        "src/composer-learn.js",
+        "src/response-capture.js",
+        "src/response-finder.js",
+        "src/site-adapter.js",
+        "src/zip.js",
+        "src/ooxml.js",
+        "src/upload-core.js",
+        "src/upload-guard.js",
+        "src/tripwire.js"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ]
+    },
+    {
+      "resources": [
+        "src/content-main.js",
+        "src/interceptor-core.js",
+        "src/composer.js",
+        "src/composer-finder.js",
+        "src/composer-learn.js",
+        "src/response-capture.js",
+        "src/response-finder.js",
+        "src/site-adapter.js",
+        "src/zip.js",
+        "src/ooxml.js",
+        "src/upload-core.js",
+        "src/upload-guard.js",
+        "src/tripwire.js"
+      ],
+      "matches": [
+        "https://grok.com/*"
+      ]
+    },
+    {
+      "resources": [
+        "src/content-main.js",
+        "src/interceptor-core.js",
+        "src/composer.js",
+        "src/composer-finder.js",
+        "src/composer-learn.js",
+        "src/response-capture.js",
+        "src/response-finder.js",
+        "src/site-adapter.js",
+        "src/zip.js",
+        "src/ooxml.js",
+        "src/upload-core.js",
+        "src/upload-guard.js",
+        "src/tripwire.js"
+      ],
+      "matches": [
+        "https://chat.deepseek.com/*"
       ]
     }
   ]

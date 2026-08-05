@@ -17,7 +17,7 @@
 // Design ref: scripts/gemini_imp.md §4 (revised — fetch moved off the page).
 
 import "./browser-api.js";
-import { redact, logTurn } from "./redact-client.js";
+import { redact, logTurn, getSurfaceConfig } from "./redact-client.js";
 
 const { api, storageGet } = globalThis.geminiRedactBrowserApi;
 
@@ -47,6 +47,11 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "logTurn" && msg.turn) {
     // Fire-and-forget per-turn logging (redacted prompt + response).
     logTurn(msg.turn, { base: CONFIG.base }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg && msg.type === "getSurfaceConfig" && typeof msg.surface === "string") {
+    // Admin enforcement config for this surface (mode/enabled). null on failure.
+    getSurfaceConfig(msg.surface, { base: CONFIG.base }).then(sendResponse);
     return true;
   }
   return false;

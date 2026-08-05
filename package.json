@@ -19,13 +19,20 @@
     "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
     "test:gemini-e2e": "node --experimental-strip-types extension/test/e2e/run.mts",
     "test:gemini-response-e2e": "node --experimental-strip-types extension/test/e2e/run-response.mts",
+    "test:chatgpt-e2e": "node --experimental-strip-types extension/test/e2e/run-chatgpt.mts",
+    "test:grok-e2e": "node --experimental-strip-types extension/test/e2e/run-grok.mts",
     "test:firefox-e2e": "node --experimental-strip-types extension/test/e2e/run-firefox.mts",
     "probe:firefox-csp": "node --experimental-strip-types extension/test/e2e/probe-firefox-csp.mts",
+    "probe:firefox-chatgpt": "node --experimental-strip-types extension/test/e2e/probe-firefox-chatgpt.mts",
+    "probe:chatgpt": "node --experimental-strip-types extension/test/e2e/probe-chatgpt.mts",
     "ext:build": "node scripts/build-extension.mjs",
     "ext:build:firefox": "node scripts/build-extension.mjs firefox",
     "ext:build:safari": "node scripts/build-extension.mjs safari",
     "watch:selectors": "node scripts/selector-watch.mjs",
-    "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs"
+    "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs",
+    "probe:firefox-upload": "node --experimental-strip-types extension/test/e2e/probe-firefox-upload.mts",
+    "probe:upload-selfcheck": "node extension/test/e2e/upload-probe-selfcheck.mjs",
+    "admin:seed": "node --experimental-strip-types scripts/admin-seed.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",

@@ -1,5 +1,7 @@
 // ===== CONFIG ================================================================
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Provider } from "./contracts.ts";
 
 export interface GatewayConfig {
@@ -33,6 +35,11 @@ export interface GatewayConfig {
   cursorDefaultModel: string;
   /** Anthropic requires max_tokens; used when the OpenAI request omits it. */
   cursorMaxTokens: number;
+  /** Admin control-plane (dashboard/analytics/controls). When false the whole
+   *  `/admin` + `/internal` subsystem is inert (no DB opened). */
+  adminEnabled: boolean;
+  /** SQLite file backing the admin subsystem (events, config, users, audit). */
+  adminDbPath: string;
 }
 
 // Cursor exposes ONE global "Override OpenAI Base URL", so a single gateway
@@ -130,6 +137,18 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     ),
     cursorDefaultModel: process.env.CURSOR_DEFAULT_MODEL ?? "claude-sonnet-5",
     cursorMaxTokens: toInt(process.env.CURSOR_MAX_TOKENS, 4096),
+    // Admin control plane: on by default in production; GATEWAY_ADMIN=0 forces
+    // off, =1 forces on. Default OFF under the node test runner so unrelated test
+    // servers don't open/write the real ~/.secure-llm-gateway/admin.db — admin
+    // tests opt in explicitly via the `adminEnabled` override.
+    adminEnabled:
+      process.env.GATEWAY_ADMIN === "1"
+        ? true
+        : process.env.GATEWAY_ADMIN === "0"
+          ? false
+          : !(process.execArgv.includes("--test") || process.env.NODE_ENV === "test"),
+    adminDbPath:
+      process.env.GATEWAY_ADMIN_DB ?? join(homedir(), ".secure-llm-gateway", "admin.db"),
   };
   const merged: GatewayConfig = {
     ...base,

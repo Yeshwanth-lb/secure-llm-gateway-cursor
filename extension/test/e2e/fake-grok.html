@@ -1,0 +1,298 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Fake Grok — send path + shape-based reply capture (e2e harness)</title>
+<!--
+  Stand-in for grok.com, used by run-grok.mts. It reproduces the parts of the
+  real page the extension depends on (extension/GROK_EXTENSION.md §4):
+
+    - the composer is `div.tiptap.ProseMirror[contenteditable]` — Tiptap IS
+      ProseMirror, so like ChatGPT it keeps its OWN document model and the
+      request is built from THAT MODEL, never from the DOM node's text. The
+      model here syncs from `input` events, so a bare `textContent = "..."`
+      assignment would NOT reach it.
+    - an UNLABELED `button[type="submit"]`. This is the interesting difference
+      from ChatGPT and Gemini, whose send buttons all carry an aria-label or a
+      data-testid: none of the generic label selectors match Grok's button, so a
+      MOUSE CLICK on it is only intercepted because content-main.js unions the
+      site's own `liveSendSelector` into the click filter. Without that the click
+      path would skip redaction entirely.
+    - the send button is replaced by an `aria-label="Stop"` button while
+      generating, which is what `isGenerating()` reads.
+    - the reply has NO semantic attribute: a rotating-looking utility class on
+      the bubble and `<span class="animate-gaussian">` word spans, exactly as
+      Grok streams it. Nothing here is in `GROK_ADAPTER.responseSelectors` (which
+      is deliberately empty), so the reply can ONLY be captured by the
+      shape-based path — response-capture.js — which is the point of this
+      fixture.
+    - suggestion chips are appended AFTER the reply, since a "last block" guess
+      grabbing a chip is the failure this project has already shipped once.
+    - a `div.ql-editor` DECOY carrying Gemini's composer selector. On grok.com it
+      must never win, which is what hostname-scoped adapters guarantee.
+
+  Modes:
+    (default)  normal page — the write reaches the model.
+    ?stale=1   the editor IGNORES programmatic edits (its model only follows real
+               keystrokes). The DOM path then cannot redact, the RAW prompt would
+               ship, and the G4 tripwire MUST abort the request.
+
+  The PII value arrives from the runner, so no PII literal lives in this fixture.
+-->
+<style>
+  #editor { display: block; width: 520px; min-height: 48px; border: 1px solid #ccc; }
+  #decoy { display: block; width: 620px; min-height: 90px; border: 1px solid #eee; }
+  .r-bubble { display: block; width: 520px; min-height: 20px; }
+</style>
+
+<button id="model-btn" aria-label="Model selector" aria-haspopup="menu">Expert</button>
+
+<main id="thread"></main>
+
+<!-- Gemini's composer selector, present as a decoy. It must never be chosen. -->
+<div id="decoy" class="ql-editor" contenteditable="true" role="textbox" aria-label="Ask Gemini">decoy composer</div>
+
+<form id="composer-form">
+  <div id="editor" class="tiptap ProseMirror w-full px-2 bg-transparent" contenteditable="true" translate="no"><p><br /></p></div>
+  <!-- Deliberately unlabeled: no aria-label, no data-testid, no "Send" text. -->
+  <button type="submit" id="send" class="h-10 w-10 rounded-full">&#9650;</button>
+</form>
+
+<!-- Attachment picker. The upload is issued at ATTACH time, not on submit. -->
+<input type="file" id="file-input" multiple />
+
+<!-- Drop target. A real app accepts a dropped file here as well as via the
+     picker, and it is the SAME uploader either way — so this is a second entry
+     point into the same leak, not a second leak. -->
+<div id="drop-zone" style="width: 520px; min-height: 40px; border: 1px dashed #999">Drop files here</div>
+
+<script>
+  // Captured BEFORE the extension module loads, so the harness's own gateway
+  // calls are not seen by the tripwire — mirroring reality, where the gateway is
+  // reached from the background worker and never from the page.
+  const RAWFETCH = window.fetch.bind(window);
+  const params = new URLSearchParams(location.search);
+  const BASE = params.get("base"); // gateway
+  const STALE = params.get("stale") === "1";
+  const REPLY =
+    "Here is the summary you asked for: the thread covers the migration plan, the rollout window and the " +
+    "owners for each step, and the next action is to confirm the schedule with the platform team before Friday.";
+  const CHIPS = ["Draft a reply", "Show fewer suggestions"];
+
+  window.__sent__ = []; // message strings the page actually POSTed
+  window.__logged__ = []; // what content-main reports for /log-turn
+  window.__blocked__ = [];
+
+  const editor = document.getElementById("editor");
+  const form = document.getElementById("composer-form");
+  const thread = document.getElementById("thread");
+
+  // ---- the editor's OWN document model -------------------------------------
+  // What gets SENT is `model`, not the DOM text. Tiptap/ProseMirror keeps such a
+  // model and updates it from the browser's editing pipeline, which
+  // `execCommand("insertText")` drives and a `textContent` assignment does not.
+  let model = "";
+  if (STALE) {
+    // A model that only ever follows real keystrokes: no programmatic edit can
+    // reach it. The extension must then fail closed via the tripwire.
+    editor.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") return;
+      if (e.key === "Backspace") model = model.slice(0, -1);
+      else if (e.key.length === 1) model += e.key;
+    });
+  } else {
+    editor.addEventListener("input", () => {
+      model = editor.textContent || "";
+    });
+  }
+
+  // ---- the page's own send path --------------------------------------------
+  // While generating, the submit button becomes a stop button (isGenerating()).
+  function stopButton(on) {
+    if (on) {
+      const stop = document.createElement("button");
+      stop.setAttribute("aria-label", "Stop generating");
+      stop.textContent = "Stop";
+      document.getElementById("send").replaceWith(stop);
+    } else {
+      const stop = document.querySelector('button[aria-label*="Stop" i]');
+      if (stop) {
+        const btn = document.createElement("button");
+        btn.type = "submit";
+        btn.id = "send";
+        btn.textContent = "\u25B2";
+        stop.replaceWith(btn);
+      }
+    }
+  }
+
+  /** A turn bubble with NO semantic role/attribute — only utility classes. */
+  function bubble(side) {
+    const row = document.createElement("div");
+    row.className = side === "user" ? "flex w-full flex-col items-end" : "flex w-full flex-col items-start";
+    const box = document.createElement("div");
+    box.className = side === "user" ? "u-bubble rounded-3xl px-4 py-2" : "r-bubble rounded-3xl px-4 py-2";
+    row.appendChild(box);
+    thread.appendChild(row);
+    return box;
+  }
+
+  /** Stream the reply one word span at a time, as Grok renders it. */
+  function streamReply() {
+    const box = bubble("assistant");
+    const words = REPLY.split(" ");
+    let i = 0;
+    return new Promise((resolve) => {
+      const t = setInterval(() => {
+        const span = document.createElement("span");
+        span.className = "animate-gaussian";
+        span.textContent = words[i] + " ";
+        box.appendChild(span);
+        if (++i >= words.length) {
+          clearInterval(t);
+          stopButton(false);
+          // Suggestion chips arrive fully formed AFTER the reply. A "last block"
+          // guess grabs one of these; the shape finder must not.
+          const chips = document.createElement("div");
+          chips.className = "flex gap-2";
+          for (const c of CHIPS) {
+            const b = document.createElement("button");
+            b.textContent = c;
+            chips.appendChild(b);
+          }
+          thread.appendChild(chips);
+          resolve();
+        }
+      }, 40);
+    });
+  }
+
+  let sending = false;
+  async function doSend() {
+    if (sending) return;
+    const text = model; // the MODEL is what ships — never the DOM node's text
+    if (!text.trim()) return;
+    sending = true;
+    bubble("user").textContent = text;
+    stopButton(true);
+    try {
+      // Deliberately the WRAPPED window.fetch, on a URL shaped like the real
+      // endpoint (confirmed live: the typed text ships as the JSON `message`
+      // field with `sender:"human"`), so the tripwire's endpoint scoping is
+      // exercised for real. An abort here must surface as "nothing sent".
+      await window.fetch("/rest/app-chat/conversations/new", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: text, sender: "human", modelName: "grok-4" }),
+      });
+      window.__sent__.push(text);
+    } catch (e) {
+      window.__aborted__ = String((e && e.message) || e);
+      stopButton(false);
+      sending = false;
+      return;
+    }
+    model = "";
+    editor.textContent = "";
+    sending = false;
+    await streamReply();
+  }
+
+  // The only submit paths: Enter, and activating the submit button (which a
+  // synthetic click on `button[type=submit]` performs, as on the real page).
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    doSend();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) doSend();
+  });
+
+  // ---- bridge stand-in: MAIN -> (isolated bridge -> background) -> gateway --
+  window.addEventListener("gemini-redact:redact-request", async (e) => {
+    const { id, text } = (e && e.detail) || {};
+    let result = { ok: false };
+    try {
+      const r = await RAWFETCH(BASE + "/redact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, source: "grok-web-extension", audit: false }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        result = { ok: true, redacted: j.redacted, piiDetected: j.piiDetected };
+      }
+    } catch {
+      /* fail closed */
+    }
+    window.dispatchEvent(new CustomEvent("gemini-redact:redact-response", { detail: { id, result } }));
+  });
+  window.addEventListener("gemini-redact:blocked", (e) => window.__blocked__.push((e.detail || {}).reason));
+  window.addEventListener("gemini-redact:log-turn", (e) => window.__logged__.push(e.detail || {}));
+
+  // ---- file upload, reproducing Grok's measured flow ------------------------
+  // Probed live on grok.com 2026-07-31 (two agreeing runs): on `change`, page JS
+  // reads `input.files` and POSTs multipart FormData with `fetch` to
+  // /http/upload-file-v2/direct — 35ms after the attach and ~24s BEFORE the
+  // message is sent. Both differences from ChatGPT matter here: FormData rather
+  // than a raw File body, and fetch rather than XHR (the wire-level backstop was
+  // XHR-only before this).
+  //
+  // The listener is on the INPUT (target phase), so the guard's document-level
+  // CAPTURE listener necessarily runs first — the ordering that lets it swallow
+  // the original event and re-fire a redacted one. The harness serves this path,
+  // so no external request is made.
+  // Deliberately the ABSOLUTE live URL, not a path on this origin: the adapter
+  // matches `{host:"grok.com", path:"/upload-file-v2/"}`, so posting to
+  // 127.0.0.1 would never match and the backstop would silently not be exercised
+  // (it read as "no abort" — a FALSE PASS on the one test that matters). The
+  // runner intercepts this host, so no external request is made.
+  const UPLOAD_URL = "https://grok.com/http/upload-file-v2/direct";
+  window.__uploads__ = []; // what the page was handed, and what it POSTed
+
+  async function uploadFiles(files) {
+    for (const f of files) {
+      // Record the bytes as the PAGE sees them, so the test can prove the file
+      // that would leave is the redacted one — not merely that a request happened.
+      window.__uploads__.push({ name: f.name, size: f.size, type: f.type, text: await f.text() });
+      const fd = new FormData();
+      fd.append("file", f);
+      try {
+        await window.fetch(UPLOAD_URL, { method: "POST", body: fd });
+      } catch (e) {
+        window.__uploadAborted__ = String((e && e.message) || e);
+      }
+    }
+  }
+
+  const fileInput = document.getElementById("file-input");
+  fileInput.addEventListener("change", () => uploadFiles(Array.from(fileInput.files)));
+
+  // Drag & drop reaches the same uploader. The listener is on the drop zone
+  // (bubble phase), so the guard's document-level CAPTURE listener runs first and
+  // can swallow the original drop — and the synthetic re-drop it dispatches at
+  // the original target has to BUBBLE back up to here to be honoured. That is
+  // the part no test covered before: a re-fire the page never receives would
+  // look identical to a successful block.
+  const dropZone = document.getElementById("drop-zone");
+  dropZone.addEventListener("dragover", (e) => e.preventDefault());
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    uploadFiles(Array.from((e.dataTransfer && e.dataTransfer.files) || []));
+  });
+
+  // Bypass path for the backstop test: POST a raw multipart body with no input
+  // involved, as if the DOM guard had failed or been circumvented. The tripwire
+  // must abort it — and this is the case that needed a fetch-side branch.
+  window.__rawUpload__ = async (text) => {
+    const fd = new FormData();
+    fd.append("file", new File([text], "leak.txt", { type: "text/plain" }));
+    try {
+      await window.fetch(UPLOAD_URL, { method: "POST", body: fd });
+      return "sent";
+    } catch (e) {
+      window.__uploadAborted__ = String((e && e.message) || e);
+      return "threw";
+    }
+  };
+</script>
+
+<script type="module" src="/src/content-main.js"></script>

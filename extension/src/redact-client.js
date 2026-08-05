@@ -12,6 +12,32 @@ export function redactUrl(base) {
 }
 
 /**
+ * Read the admin surface config (mode/enabled) for enforcement. Loopback-gated
+ * GET, no auth (same trust boundary as /redact). Returns null on any failure so
+ * the caller keeps its current policy rather than flipping on a transient error —
+ * enforcement must never DROP to unprotected because a poll missed.
+ *
+ * @param {string} surface  one of gemini|chatgpt|grok|deepseek
+ * @param {{base?:string, timeoutMs?:number, fetchImpl?:typeof fetch}} [opts]
+ */
+export async function getSurfaceConfig(surface, opts = {}) {
+  const base = (opts.base || "http://127.0.0.1:8001").replace(/\/+$/, "");
+  const doFetch = opts.fetchImpl || fetch;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), opts.timeoutMs || 3000);
+  try {
+    const res = await doFetch(`${base}/internal/config/${encodeURIComponent(surface)}`, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return { enabled: j.enabled !== false, mode: typeof j.mode === "string" ? j.mode : "redact" };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
  * Ask the local gateway to redact `text`.
  * Resolves to { ok, redacted, piiDetected, matched } — `ok:false` means the
  * gateway was unreachable / errored (caller MUST fail closed; see
@@ -57,7 +83,12 @@ export async function redact(text, opts = {}) {
  * never throws. The gateway redacts both sides server-side and stores only
  * redacted text.
  *
- * @param {{prompt:string, response:string, model?:string}} turn
+ * `provider`/`source` identify the surface (site-adapter.js supplies them):
+ * Gemini defaults, ChatGPT sends `provider:"openai"` +
+ * `source:"chatgpt-web-extension"`. Both are existing `/log-turn` parameters —
+ * the gateway is unchanged.
+ *
+ * @param {{prompt:string, response:string, model?:string, provider?:string, source?:string}} turn
  * @param {{base?:string, timeoutMs?:number, fetchImpl?:typeof fetch}} [opts]
  */
 export async function logTurn(turn, opts = {}) {
@@ -73,7 +104,12 @@ export async function logTurn(turn, opts = {}) {
         prompt: String(turn.prompt || ""),
         response: String(turn.response || ""),
         model: turn.model || "gemini",
-        source: "gemini-web-extension",
+        provider: turn.provider || "gemini",
+        source: turn.source || "gemini-web-extension",
+        // An UNSCANNED attachment (upload policy "warn") reached the model
+        // without passing the PII gate. Same flag the Cursor bypass audits use,
+        // so the Inspector shows the existing `unchecked` pill.
+        ...(turn.unchecked === true ? { unchecked: true } : {}),
       }),
       signal: ctrl.signal,
     });

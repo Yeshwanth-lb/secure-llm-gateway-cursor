@@ -26,6 +26,9 @@
 //
 // Design ref: scripts/gemini_imp.md §4.4, §6 Stage 4, §7 risk 5; REBUILD_PLAYBOOK §3.7.
 
+import { GEMINI_ADAPTER, CHATGPT_ADAPTER, GROK_ADAPTER, DEEPSEEK_ADAPTER } from "./site-adapter.js";
+import { isUploadUrl, uploadBlobsOf } from "./upload-core.js";
+
 // --- Luhn (mirrors src/redaction.ts luhnValid) ------------------------------
 /** Luhn checksum — a candidate digit run is a card only if this passes. */
 export function luhnValid(digits) {
@@ -80,26 +83,35 @@ export function bodyLooksRaw(body) {
 }
 
 // --- Endpoint scoping -------------------------------------------------------
-// Substrings that identify Gemini's prompt/generate request. Tunable, like the
+// Substrings that identify a site's prompt/generate request. Tunable, like the
 // composer selectors — CONFIRM against the live Network tab and add the live
 // substring if it drifts. Only requests matching one of these are inspected.
-export const DEFAULT_GEMINI_ENDPOINTS = [
-  // gemini.google.com (Bard web server)
-  "/BardChatUi/",
-  "StreamGenerate",
-  "assistant.lamda",
-  "BardFrontendService",
-  "batchexecute",
-  // Google Workspace side panel (Gmail/Docs/Sheets/Slides/Chat) — verified live
-  // 2026-07-21: the generate call is lowercase `streamGenerate` on the
-  // appsgenaiservice host. `includes` is case-sensitive, so the lowercase form
-  // must be listed explicitly (the capitalized Bard one above does NOT match it).
-  "streamGenerate",
-  "appsgenaiservice",
+//
+// The lists live with the rest of each site's knowledge in site-adapter.js (one
+// source of truth, so adding a surface can't leave the tripwire behind). The
+// detection itself — bodyLooksRaw, Luhn, the fetch/XHR wrapping — is site-
+// agnostic and unchanged.
+export const DEFAULT_GEMINI_ENDPOINTS = GEMINI_ADAPTER.tripwireEndpoints;
+export const DEFAULT_CHATGPT_ENDPOINTS = CHATGPT_ADAPTER.tripwireEndpoints;
+export const DEFAULT_GROK_ENDPOINTS = GROK_ADAPTER.tripwireEndpoints;
+// DeepSeek NOTE: its request body is encrypted (WASM proof-of-work), so this list
+// is best-effort there — the tripwire cannot read a ciphertext body. The composer
+// intercept is the real protection on DeepSeek. Listed anyway: harmless, and it
+// covers the case DeepSeek ever ships a plaintext body. See site-adapter.js.
+export const DEFAULT_DEEPSEEK_ENDPOINTS = DEEPSEEK_ADAPTER.tripwireEndpoints;
+// The default when a caller doesn't scope by site: the union, so a request is
+// inspected on whichever surface it appears. Cross-site fragments simply never
+// match (a Gemini fragment can't occur in a ChatGPT URL), and content-main.js
+// passes its own site's list anyway.
+export const DEFAULT_ENDPOINTS = [
+  ...DEFAULT_GEMINI_ENDPOINTS,
+  ...DEFAULT_CHATGPT_ENDPOINTS,
+  ...DEFAULT_GROK_ENDPOINTS,
+  ...DEFAULT_DEEPSEEK_ENDPOINTS,
 ];
 
-/** True only if `url` looks like a Gemini generate endpoint we should inspect. */
-export function shouldInspectUrl(url, endpoints = DEFAULT_GEMINI_ENDPOINTS) {
+/** True only if `url` looks like a generate endpoint we should inspect. */
+export function shouldInspectUrl(url, endpoints = DEFAULT_ENDPOINTS) {
   if (typeof url !== "string" || url === "") return false;
   return endpoints.some((frag) => url.includes(frag));
 }
@@ -128,7 +140,12 @@ export function extractUrl(input) {
  * @param {{endpoints?: string[]}} [opts]
  */
 export function installTripwire(win = window, opts = {}) {
-  const endpoints = opts.endpoints || DEFAULT_GEMINI_ENDPOINTS;
+  const endpoints = opts.endpoints || DEFAULT_ENDPOINTS;
+  // File uploads are a SEPARATE list: the bytes may go to a different host
+  // entirely (`<region>.oaiusercontent.com`) and are carried as a Blob or as
+  // multipart FormData rather than a string. Empty unless the surface has been
+  // probed, so nothing changes for Gemini.
+  const uploadEndpoints = opts.uploadEndpoints || [];
   const notify = (reason) => {
     try {
       win.dispatchEvent(new CustomEvent("gemini-redact:blocked", { detail: { reason } }));
@@ -137,9 +154,60 @@ export function installTripwire(win = window, opts = {}) {
     }
   };
 
+  /**
+   * Read every file-bearing part of an upload body and report whether any of them
+   * contains raw PII. Shared by the fetch and XHR backstops.
+   *
+   * A read failure resolves to `false` (send it): this is a BACKSTOP whose
+   * contract is "abort when raw PII is SEEN", and the attach-time guard has
+   * already refused anything it could not read. Note the inherent ceiling — a
+   * genuinely binary body (an image) reads as garbage no rule matches, so uploads
+   * of unscannable formats can only be stopped at attach time, never here.
+   */
+  async function uploadLooksRaw(blobs) {
+    for (const blob of blobs) {
+      let text;
+      try {
+        text = await blob.text();
+      } catch {
+        continue;
+      }
+      if (bodyLooksRaw(text)) return true;
+    }
+    return false;
+  }
+
   const origFetch = win.fetch;
   if (typeof origFetch === "function") {
     win.fetch = function (input, init) {
+      // UPLOAD backstop, fetch side. ChatGPT PUTs its files over XHR, so this
+      // branch did not exist until Grok — which POSTs multipart FormData with
+      // `fetch` to /http/upload-file-v2/direct (probed live 2026-07-31). Without
+      // it, Grok's uploads have no wire-level net at all whatever the body shape.
+      //
+      // Inspecting means an async read, and unlike XHR.send that costs nothing
+      // here: fetch already returns a promise, so the read is simply awaited
+      // before delegating. The request still goes out (or doesn't) exactly once.
+      try {
+        if (uploadEndpoints.length) {
+          const body = init && init.body;
+          const blobs = uploadBlobsOf(body);
+          if (blobs.length && isUploadUrl(extractUrl(input), uploadEndpoints)) {
+            const self = this;
+            const args = arguments;
+            return uploadLooksRaw(blobs).then((raw) => {
+              if (raw) {
+                console.error("[gemini-redact] tripwire: raw PII in outgoing file upload — aborting");
+                notify("tripwire-upload");
+                throw new Error("blocked by PII tripwire");
+              }
+              return origFetch.apply(self, args);
+            });
+          }
+        }
+      } catch {
+        /* inspection failure is non-fatal — primary DOM path already ran */
+      }
       try {
         const url = extractUrl(input);
         if (shouldInspectUrl(url, endpoints)) {
@@ -174,6 +242,42 @@ export function installTripwire(win = window, opts = {}) {
     if (typeof XHR.prototype.send === "function") {
       const origSend = XHR.prototype.send;
       XHR.prototype.send = function (body) {
+        // UPLOAD backstop. The body is a Blob/File, so inspecting it means an
+        // ASYNC read — which is why `send()` is DEFERRED here instead of
+        // inspected inline. The request still goes out (or doesn't) exactly once;
+        // it just starts a tick later.
+        //
+        // Read failure passes the request through: this is a BACKSTOP whose
+        // contract is "abort when raw PII is SEEN". The attach-time guard
+        // (upload-guard.js) is the primary gate and has already refused anything
+        // it could not read. Note the inherent ceiling — a genuinely binary body
+        // (an image) reads as garbage that no rule matches, so uploads of
+        // unscannable formats can only be stopped at attach time, never here.
+        try {
+          const blobs = uploadEndpoints.length ? uploadBlobsOf(body) : [];
+          if (blobs.length && isUploadUrl(this.__geminiRedactUrl || "", uploadEndpoints)) {
+            const self = this;
+            const args = arguments;
+            // `uploadBlobsOf` also unpacks multipart, so a surface that switched
+            // from a raw PUT to FormData over XHR stays covered.
+            uploadLooksRaw(blobs).then((raw) => {
+              if (raw) {
+                console.error("[gemini-redact] tripwire: raw PII in outgoing file upload — aborting");
+                notify("tripwire-upload");
+                try {
+                  self.dispatchEvent(new ProgressEvent("error"));
+                } catch {
+                  /* the abort is the not-sending; the event is a courtesy */
+                }
+                return;
+              }
+              origSend.apply(self, args);
+            });
+            return;
+          }
+        } catch {
+          /* fall through to the normal path */
+        }
         try {
           if (shouldInspectUrl(this.__geminiRedactUrl || "", endpoints)) {
             if (bodyLooksRaw(typeof body === "string" ? body : "")) {

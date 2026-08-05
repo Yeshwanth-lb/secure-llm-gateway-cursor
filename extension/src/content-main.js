@@ -9,9 +9,10 @@
 // unit-tested) — this file is the DOM/event glue around that core.
 
 import { createInterceptor, decideSubmission } from "./interceptor-core.js";
-import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer, isGenerating } from "./composer.js";
+import { findComposer, readText, writeText, findSendButton, selectorsHealthy, getModel, readLatestResponse, responseCount, setLearnedComposer, isGenerating, currentAdapter, setSite, liveSendSelector } from "./composer.js";
 import { createResponseCapture } from "./response-capture.js";
 import { installTripwire } from "./tripwire.js";
+import { installUploadGuard } from "./upload-guard.js";
 
 /**
  * Ask the isolated-world bridge (which relays to the background service worker)
@@ -78,6 +79,10 @@ let CONFIG = {
 //     in the top document (Docs/Sheets/Slides via appsElements); or
 //   - a chat.google.com subframe — the Gemini panel used by Gmail/Drive.
 // Every other subframe stays completely inert (no listeners, no tripwire).
+//
+// chatgpt.com, grok.com and chat.deepseek.com need nothing extra here: each is a
+// single top-level SPA (no cross-origin composer iframe), so the top-frame rule
+// already arms them, and any third-party subframe on those pages stays inert.
 function isArmableFrame() {
   if (window.top === window) return true; // top frame — unchanged behavior
   return location.hostname === "chat.google.com";
@@ -92,13 +97,48 @@ let sawComposer = false;
 let tripwireInstalled = false;
 function applyTripwire() {
   if (ARMED && CONFIG.tripwire && !tripwireInstalled) {
-    installTripwire(window, CONFIG.tripwireEndpoints ? { endpoints: CONFIG.tripwireEndpoints } : {});
+    // Inspect only THIS site's generate endpoint (site-adapter.js), so a ChatGPT
+    // URL fragment is never tested against a Gemini page or vice-versa. A storage
+    // override still wins, as before.
+    const endpoints = CONFIG.tripwireEndpoints || currentAdapter().tripwireEndpoints;
+    installTripwire(window, { endpoints, uploadEndpoints: currentAdapter().uploadEndpoints || [] });
     tripwireInstalled = true;
   }
 }
+
+// FILE UPLOADS bypass the composer entirely, and the bytes leave at ATTACH time —
+// ~19s before the message is sent on ChatGPT (probed live 2026-07-30). So the
+// guard hooks change/drop/paste rather than submit. Only enabled on surfaces whose
+// upload flow has actually been probed (`adapter.uploadGuard`).
+let uploadGuardInstalled = false;
+function applyUploadGuard() {
+  if (!ARMED || uploadGuardInstalled || CONFIG.uploadGuard === false) return;
+  uploadGuardInstalled = installUploadGuard(window, {
+    adapter: currentAdapter(),
+    redact: requestRedaction,
+    notify: notifyBlocked,
+    // "block" (default) refuses files it cannot read; "warn" uploads them and
+    // files an `unchecked` audit row instead, for people who must attach real
+    // work files. Set via managed/local extension storage.
+    policy: CONFIG.uploadPolicy,
+    audit: (turn) => {
+      const adapter = currentAdapter();
+      window.dispatchEvent(
+        new CustomEvent("gemini-redact:log-turn", {
+          detail: { ...turn, provider: adapter.provider, source: adapter.source },
+        }),
+      );
+    },
+    debug: CONFIG.debug,
+  });
+}
 window.addEventListener("gemini-redact:config", (e) => {
   if (e && e.detail && typeof e.detail === "object") CONFIG = { ...CONFIG, ...e.detail };
+  // `site` forces a site adapter. Production never sets it (the hostname decides);
+  // the e2e harnesses do, because their fake pages are served from 127.0.0.1.
+  if (CONFIG.site) setSite(CONFIG.site);
   applyTripwire();
+  applyUploadGuard();
 });
 
 // LAYER 1.5 — the isolated bridge restores the persisted composer fingerprint
@@ -109,19 +149,60 @@ window.addEventListener("gemini-redact:learned-composer", (e) => {
 });
 
 /** Show the user why a send was blocked (fail-closed paths). Replace with real UI. */
-function notifyBlocked(reason) {
+function notifyBlocked(reason, detail) {
   const msg =
     reason === "gateway-unreachable"
       ? "PII gateway unreachable — message blocked (fail-closed). Start the local gateway and retry."
       : reason === "selectors-broken"
         ? "Redaction extension can't find the composer (Gemini UI may have changed) — sending disabled to avoid leaking PII."
-        : "Message blocked by PII redaction policy.";
-  console.warn("[gemini-redact]", msg);
+        : reason === "upload-blocked"
+          ? // Uploads leave at ATTACH time, so this is a refusal to attach at all.
+            // Formats we cannot read as text (PDF/DOCX/XLSX/images) can never be
+            // scrubbed without adding dependencies, so they are refused rather
+            // than uploaded unscanned.
+            "File attachment blocked: it can't be scanned for PII (only text-like files can be redacted). Paste the relevant text instead."
+          : reason === "admin-blocked"
+            ? // An administrator disabled this surface in the gateway AI Controls,
+              // so sending is turned off here entirely (not a PII match).
+              "This AI surface has been disabled by your administrator. Sending is blocked."
+            : "Message blocked by PII redaction policy.";
+  console.warn("[gemini-redact]", msg, detail || "");
   try {
-    window.dispatchEvent(new CustomEvent("gemini-redact:blocked", { detail: { reason, msg } }));
+    window.dispatchEvent(new CustomEvent("gemini-redact:blocked", { detail: { reason, msg, info: detail || "" } }));
   } catch {
     /* non-fatal */
   }
+}
+
+// ADMIN ENFORCEMENT (Phase U). The gateway AI-Controls setting for THIS surface,
+// polled from /internal/config/:surface via the SW bridge. `blocked` stops every
+// send on the site (admin kill switch / mode "block"); `off` disables redaction
+// (raw sends proceed); default is redact (the normal flow). Starts as redact so a
+// pre-config send is never accidentally blocked; a failed poll keeps the last
+// known policy (never silently drops protection).
+let surfacePolicy = { blocked: false, off: false, mode: "redact", enabled: true };
+function applySurfacePolicy(cfg) {
+  if (!cfg || typeof cfg !== "object") return; // poll failed -> keep current
+  const enabled = cfg.enabled !== false;
+  const mode = typeof cfg.mode === "string" ? cfg.mode : "redact";
+  surfacePolicy = { enabled, mode, blocked: !enabled || mode === "block", off: enabled && mode === "off" };
+  if (CONFIG.debug) console.info("[gemini-redact] surface policy:", JSON.stringify(surfacePolicy));
+}
+window.addEventListener("gemini-redact:policy-response", (e) => {
+  if (e && e.detail) applySurfacePolicy(e.detail.result);
+});
+/** Ask the bridge for this surface's admin policy. */
+function requestSurfacePolicy() {
+  try {
+    const surface = currentAdapter().id;
+    window.dispatchEvent(new CustomEvent("gemini-redact:policy-request", { detail: { surface } }));
+  } catch {
+    /* adapter not ready yet — the interval will retry */
+  }
+}
+if (ARMED) {
+  requestSurfacePolicy();
+  setInterval(requestSurfacePolicy, 15000); // near-real-time; admin changes land within ~15s
 }
 
 /**
@@ -162,6 +243,24 @@ async function onSubmitEvent(event) {
     if (CONFIG.debug) console.info("[gemini-redact] skip: empty text — send proceeds unredacted");
     return; // empty submit can't leak — let it proceed normally
   }
+
+  // ADMIN POLICY (Phase U) — checked on a REAL send (composer found, non-empty),
+  // before redaction:
+  //   - blocked: an admin disabled this surface (kill switch / mode "block") ->
+  //     stop the send entirely. This is the "restrict the user" control.
+  //   - off: redaction disabled for this surface -> return WITHOUT killing the
+  //     event so the page's own submit proceeds with the raw text.
+  if (surfacePolicy.blocked) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    notifyBlocked("admin-blocked");
+    return;
+  }
+  if (surfacePolicy.off) {
+    if (CONFIG.debug) console.info("[gemini-redact] surface mode=off — send proceeds unredacted");
+    return; // let the native submit go (raw) — admin turned redaction off here
+  }
+
   if (CONFIG.debug) console.info("[gemini-redact] KILLING original submit + redacting");
 
   // KILL the original event fully — we cannot pause and resume it across the
@@ -230,6 +329,7 @@ async function onSubmitEvent(event) {
  * pairing in an audit log is worse than a blank one.
  */
 function captureAndLogTurn(rawPrompt, sentText, composer) {
+  const adapter = currentAdapter();
   const model = getModel();
   // Snapshot the assistant-response state BEFORE our reply arrives, so we only
   // capture THIS turn's reply and never mispair a previous turn's answer.
@@ -248,15 +348,19 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
   // the real reply that arrived later (deep-research / slow turns).
   const LOADING_RE =
     /\b(collecting info|thinking|working on it|searching|analy[sz]ing|generating|reasoning|hold on|just a (?:sec|moment)|let me (?:think|check))\b/i;
+  // The status LABELS a site renders inside the reply node are per-site
+  // (site-adapter.js); ChatGPT has none, so those steps are skipped there.
+  const labelOnly = adapter.responseLabelOnly;
+  const labelPrefix = adapter.responseLabelPrefix;
   const isPlaceholder = (t) => {
     const n = norm(t);
     if (!n) return true;
-    if (/^(gemini response|model thoughts|show thinking)$/i.test(n)) return true;
-    const body = n.replace(/^(gemini response|model thoughts|show thinking)\s*/i, "");
+    if (labelOnly && labelOnly.test(n)) return true;
+    const body = labelPrefix ? n.replace(labelPrefix, "") : n;
     return LOADING_RE.test(body) && body.length < 60;
   };
   // Drop the leading status label from the text we actually store.
-  const clean = (t) => norm(t).replace(/^(gemini response|show thinking|model thoughts)\s*/i, "");
+  const clean = (t) => (labelPrefix ? norm(t).replace(labelPrefix, "") : norm(t));
 
   const shape = createResponseCapture(sentText || rawPrompt, document, composer);
 
@@ -298,8 +402,13 @@ function captureAndLogTurn(rawPrompt, sentText, composer) {
         "responseLen=" + response.length,
       );
     }
+    // provider/source identify the SURFACE in the gateway's traffic log:
+    // gemini → provider "gemini", ChatGPT → provider "openai" (its API family,
+    // already a valid Provider — the frozen enum needs no change).
     window.dispatchEvent(
-      new CustomEvent("gemini-redact:log-turn", { detail: { prompt: rawPrompt, response, model } }),
+      new CustomEvent("gemini-redact:log-turn", {
+        detail: { prompt: rawPrompt, response, model, provider: adapter.provider, source: adapter.source },
+      }),
     );
   };
   // Arm the "settled" countdown once a real (non-placeholder) reply is present,
@@ -347,11 +456,12 @@ function fireSubmit(composer) {
   // button. gemini web still resolves via the same enabled+visible rule.
   const pickLive = (scope) => {
     if (!scope || !scope.querySelectorAll) return null;
-    const cands = [
-      ...scope.querySelectorAll(
-        'button.send-button, button[aria-label="Submit" i], button[aria-label*="Send message" i], button[aria-label*="Send" i]',
-      ),
-    ];
+    let cands;
+    try {
+      cands = [...scope.querySelectorAll(liveSendSelector())];
+    } catch {
+      return null;
+    }
     return cands.find((b) => !b.disabled && b.offsetParent !== null) || null;
   };
   let btn = null;
@@ -397,11 +507,29 @@ if (ARMED) {
     // Enter (without Shift) is Gemini's send gesture.
     if (e.key === "Enter" && !e.shiftKey) onSubmitEvent(e);
   }, true);
+  // Clicking the send control is the other submit gesture. The generic labels
+  // below cover Gemini and ChatGPT, but a surface can label its button with
+  // nothing at all — Grok's is an unlabeled `button[type="submit"]`, which none
+  // of them match, so a mouse click there would skip interception entirely and
+  // send the raw prompt (the tripwire would abort it: fail-closed, no leak, but
+  // the message silently fails). So UNION the generic labels with the current
+  // site's live-send selector. Union, not replacement: the generic list is what
+  // Gemini and ChatGPT have always matched on, and narrowing it is a leak risk.
+  // `liveSendSelector` (not `sendButtonSelectors`) is used deliberately — the
+  // latter ends in broad catch-alls like `button:has(mat-icon)`, and treating
+  // every icon button on a Gemini page as a send control would kill unrelated
+  // clicks whenever the composer has text.
+  const clickSendSelector = () =>
+    'button[aria-label*="Send" i], button[aria-label*="Submit" i], button[data-testid*="send" i], ' + liveSendSelector();
   document.addEventListener("click", (e) => {
     const el = e.target;
-    if (el && el.closest && el.closest('button[aria-label*="Send" i], button[aria-label*="Submit" i], button[data-testid*="send" i]')) {
-      onSubmitEvent(e);
+    let hit = false;
+    try {
+      hit = !!(el && el.closest && el.closest(clickSendSelector()));
+    } catch {
+      hit = false; // a selector this engine can't parse must not break the listener
     }
+    if (hit) onSubmitEvent(e);
   }, true);
 
   // Periodic health check (Stage 5): if selectors break, announce so the isolated
@@ -413,6 +541,11 @@ if (ARMED) {
     // seen before) — otherwise a composerless armed frame would spam "broken".
     if (!h.healthy && sawComposer) notifyBlocked("selectors-broken");
   }, 15000);
+
+  // Install at boot too, not only when config arrives: the guard needs no config
+  // (its surface comes from the hostname), and a missing/late bridge must not
+  // leave file attachments unguarded. Both paths are idempotent.
+  applyUploadGuard();
 
   console.info("[gemini-redact] content script active (MAIN world) frame=", location.host);
 }

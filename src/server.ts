@@ -9,11 +9,14 @@ import { sendJson, readBody, BodyTooLargeError } from "./http-utils.ts";
 import { resolveRoute } from "./routing.ts";
 import { proxyRequest } from "./proxy.ts";
 import { getActiveRuleInfo, redactText, redactJson } from "./redaction.ts";
-import { trafficLog } from "./traffic-log.ts";
+import { trafficLog, setTrafficListener } from "./traffic-log.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
 import { handleControlApi, isApiPath } from "./control-api.ts";
 import { cleanEntry } from "./clean-view.ts";
+import { isAdminPath, handleAdminApi } from "./admin-api.ts";
+import { openAdminStore, surfaceOf } from "./admin-store.ts";
+import { ADMIN_HTML } from "./admin-console.ts";
 
 function sendHtml(res: ServerResponse, html: string): void {
   const body = Buffer.from(html, "utf8");
@@ -176,6 +179,12 @@ async function handleRequest(
     sendHtml(res, CONSOLE_HTML);
     return;
   }
+  // Admin dashboard shell (login + analytics/controls/audit). Static HTML, like
+  // the console; the data behind it is JWT-gated at /admin/api/*.
+  if (method === "GET" && path === "/admin" && config.adminEnabled) {
+    sendHtml(res, ADMIN_HTML);
+    return;
+  }
 
   // Admin endpoints — answered before touching the body.
   // /healthz carries a stable installId so an installer/doctor can confirm the
@@ -219,7 +228,7 @@ async function handleRequest(
   const hookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
   const controlPath =
     path === "/logs" || path === "/rules" || hookPath ||
-    isApiPath(path) || isMcpPath(path);
+    isApiPath(path) || isMcpPath(path) || isAdminPath(path);
   if (
     controlPath &&
     !controlPlaneAllowed(req, config) &&
@@ -448,6 +457,13 @@ async function handleRequest(
     return;
   }
 
+  // Admin control plane — dashboard API (JWT-gated) + enforcement internals
+  // (loopback-gated above). Self-contained; never throws to the caller.
+  if (isAdminPath(path)) {
+    handleAdminApi(req, res, config, bodyBuf, method, url);
+    return;
+  }
+
   // Control plane — console API (rule toggles, custom rules, allowlist).
   if (isApiPath(path)) {
     if (method === "POST" && !mutationAllowed(req, config)) {
@@ -478,6 +494,30 @@ async function handleRequest(
 /** Create (but do not start) the gateway HTTP server. Tests inject config overrides. */
 export function createGatewayServer(overrides: Partial<GatewayConfig> = {}): http.Server {
   const config = loadConfig(overrides);
+
+  // Persist one analytics event per decision (metadata only — never raw PII).
+  // A single traffic-log listener covers EVERY decision site (proxy, /redact,
+  // /log-turn) without editing them; wrapped so it can never affect traffic.
+  if (config.adminEnabled) {
+    try {
+      const store = openAdminStore(config.adminDbPath);
+      setTrafficListener((e: LogEntry) => {
+        const inbound = e.matchedRules?.inbound ?? {};
+        const outbound = e.matchedRules?.outbound ?? {};
+        const types = Array.from(new Set([...Object.keys(inbound), ...Object.keys(outbound)]));
+        store.recordEvent({
+          surface: surfaceOf(e),
+          direction: Object.keys(inbound).length ? "outgoing" : Object.keys(outbound).length ? "incoming" : "outgoing",
+          decision: e.blocked ? "blocked" : e.piiDetected ? "redacted" : "allowed",
+          pii_types: types,
+          latency_ms: e.durationMs,
+        });
+      });
+    } catch {
+      /* if the store can't open, the gateway still runs — admin is just inert */
+    }
+  }
+
   return http.createServer((req, res) => {
     handleRequest(req, res, config).catch(() => {
       if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });

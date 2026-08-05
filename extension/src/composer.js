@@ -1,7 +1,11 @@
-// ===== COMPOSER — DOM read/write for the Gemini prompt box =================
+// ===== COMPOSER — DOM read/write for the prompt box ========================
 // All the genuinely browser-dependent, selector-fragile logic lives here. This
-// is the code most likely to break on a Gemini UI change (see §7 risk 3/5),
-// and is validated against the LIVE page in Stage 2/3, not headlessly.
+// is the code most likely to break on a UI change (see §7 risk 3/5), and is
+// validated against the LIVE page in Stage 2/3, not headlessly.
+//
+// The SELECTORS themselves are not here — they are per-site and live in
+// site-adapter.js, chosen by hostname (gemini.google.com + Workspace, or
+// chatgpt.com). This file is the site-agnostic DOM glue around them.
 //
 // Design ref: scripts/gemini_imp.md §4.1. Two hard requirements it encodes:
 //   1. Writing text must update the framework's MODEL, not just the DOM node
@@ -19,6 +23,27 @@
 
 import { pickComposer, MIN_COMPOSER_AREA } from "./composer-finder.js";
 import { chooseComposer } from "./composer-learn.js";
+import { getAdapter, adapterById } from "./site-adapter.js";
+
+// Which SITE's selectors this page uses, chosen by hostname (site-adapter.js).
+// Every site-specific selector below comes from here, so ChatGPT selectors never
+// run on a Gemini surface and vice-versa. Resolved once at load; an unknown host
+// falls back to the Gemini adapter (the pre-ChatGPT behavior).
+let ADAPTER = getAdapter();
+/** The adapter in force — content-main.js reads it for provider/source/labels. */
+export function currentAdapter() {
+  return ADAPTER;
+}
+/**
+ * Force a site adapter by id. Production resolves the site from the hostname;
+ * this exists for the e2e harnesses, whose fake pages are served from
+ * 127.0.0.1 and therefore cannot be identified by host.
+ */
+export function setSite(id) {
+  const next = adapterById(id);
+  if (next) ADAPTER = next;
+  return ADAPTER;
+}
 
 // LAYER 1.5 — a composer fingerprint learned from a prior submit (see
 // composer-learn.js). Set by content-main.js from chrome.storage on load;
@@ -41,25 +66,6 @@ function persistFingerprint(fp) {
     /* non-fatal */
   }
 }
-
-// Candidate selectors for Gemini's composer, most-specific first. Centralized
-// so the Stage 5 health check has one place to verify and so a UI change is a
-// one-line fix. ADJUST against the live site during Stage 2.
-// FAST-PATH selectors — Gemini/Workspace-SPECIFIC and high-confidence ONLY.
-// Deliberately NO generic catch-alls (`div[role=textbox]`, `textarea[aria-label]`):
-// a generic selector can match the WRONG sane element (a search box, a doc
-// canvas, or the ambiguous-box case) and the blind fast-path would return it
-// before the stronger focus/learned signals run — which leaked raw PII in the
-// Layer-1.5 e2e. Generic editables are instead ranked by the fallback
-// (focus > learned fingerprint > heuristic shape), where the box the user is
-// actually typing in wins. The Sheets stray `role=textbox` decoy is handled
-// there too (disqualified on area). ADJUST against the live site during Stage 2.
-const COMPOSER_SELECTORS = [
-  'div.ql-editor[contenteditable="true"]', // gemini.google.com — Quill editor
-  "rich-textarea .ql-editor",
-  // Workspace apps (Gmail/Docs/Sheets/Slides/Drive/Chat) — appsElements composer.
-  'div[contenteditable="true"][aria-label*="Ask Gemini" i]',
-];
 
 /**
  * Is this element a plausibly-real composer box (visible + large enough)? Used
@@ -119,9 +125,9 @@ function hasNearbySend(rect, root) {
  * Fallback: rank all editable candidates heuristically (survives DOM changes).
  */
 export function findComposer(root = document) {
-  // Fast-path — exact selectors, but only accept a sane (visible, sized) hit so
-  // a decoy match can't win over the real composer.
-  for (const sel of COMPOSER_SELECTORS) {
+  // Fast-path — the SITE's exact selectors (site-adapter.js), but only accept a
+  // sane (visible, sized) hit so a decoy match can't win over the real composer.
+  for (const sel of ADAPTER.composerSelectors) {
     let el;
     try {
       el = root.querySelector(sel);
@@ -206,6 +212,17 @@ export function writeText(el, text) {
   // execCommand is deprecated but remains the most reliable cross-framework way
   // to edit a contenteditable such that Quill/Angular observe the change.
   //
+  // PROVEN ON ChatGPT (ProseMirror) TOO — 2026-07-30, `npm run probe:chatgpt`.
+  // ChatGPT's composer keeps its own ProseMirror document model, so the write had
+  // to be verified on the WIRE, not in the DOM. It was, and this exact path won:
+  // the /backend-api/conversation body carried the token with zero raw PII. The
+  // three alternatives all failed and must NOT be reintroduced:
+  //   - the hidden companion `textarea[name="prompt-textarea"]`: accepts the value
+  //     but the request is built from ProseMirror -> RAW on the wire;
+  //   - a synthetic `paste` (ClipboardEvent + DataTransfer): ProseMirror consumes
+  //     it but ignores our Range selection, so it APPENDS -> raw AND token sent;
+  //   - `beforeinput` with `insertReplacementText`: ignored entirely -> RAW.
+  //
   // KNOWN LIMITATION — Firefox + Google Workspace panel (Docs/Sheets/Gmail/Drive/
   // Chat): this updates the VISIBLE text but Gemini's Angular model keeps the raw
   // value, so it XHRs the raw email. The G4 tripwire catches that and ABORTS the
@@ -221,8 +238,22 @@ export function writeText(el, text) {
     const range = document.createRange();
     range.selectNodeContents(el);
     sel.addRange(range);
-    const ok = document.execCommand("insertText", false, text);
-    if (ok) return true;
+    // GOOGLE WORKSPACE "Ask Gemini" panel (appsElementsRichTextInput, a
+    // `role="combobox"` contenteditable on newer builds): a single insertText
+    // OVER a selection updates the DOM but the CONTROLLED model treats it as an
+    // append and keeps the stale (raw) text, so the send ships raw and the
+    // tripwire aborts. A clean delete (model observes content removed) THEN
+    // insertText (model observes the new text) is a real editing replace the
+    // model handler processes correctly — and uses only genuine editing commands,
+    // NOT synthetic keystrokes (those corrupted normal sends). Scoped by class so
+    // Quill (gemini.google.com) and ProseMirror (ChatGPT/Grok), which already sync
+    // from a plain insertText, are byte-for-byte unchanged.
+    if (/appsElements/i.test((el.className || "").toString())) {
+      document.execCommand("delete", false);
+      if (document.execCommand("insertText", false, text)) return true;
+    } else {
+      if (document.execCommand("insertText", false, text)) return true;
+    }
   } catch {
     /* fall through to the best-effort path */
   }
@@ -234,21 +265,26 @@ export function writeText(el, text) {
 
 /**
  * Locate the send button (best-effort; used as the programmatic re-submit path).
- * Gemini renders it only once the composer has text, and its label/markup vary
- * (localized aria-label, mat-icon-button, `send-button` class). Try several
- * shapes, most-specific first. ADJUST against the live site if re-submit fails.
+ * A site renders it only once the composer has text, and its label/markup vary
+ * (localized aria-label, mat-icon-button, `data-testid`), so the adapter supplies
+ * an ordered, most-specific-first list. ADJUST there if re-submit fails live.
  */
 export function findSendButton(root = document) {
-  return (
-    root.querySelector('button.send-button') ||
-    root.querySelector('button[aria-label*="Send" i]') ||
-    root.querySelector('button[aria-label*="Submit" i]') ||
-    root.querySelector('button[mattooltip*="Send" i]') ||
-    root.querySelector('[data-test-id="send-button"], [data-testid*="send" i]') ||
-    root.querySelector('button:has(mat-icon[fonticon="send"])') ||
-    root.querySelector('button:has(mat-icon)') ||
-    null
-  );
+  for (const sel of ADAPTER.sendButtonSelectors) {
+    let el;
+    try {
+      el = root.querySelector(sel);
+    } catch {
+      continue; // a selector this engine can't parse (e.g. :has) — skip it
+    }
+    if (el) return el;
+  }
+  return null;
+}
+
+/** The enabled+visible send-control selector for this site (used by fireSubmit). */
+export function liveSendSelector() {
+  return ADAPTER.liveSendSelector;
 }
 
 /**
@@ -261,9 +297,7 @@ export function findSendButton(root = document) {
  * do NOT match, to avoid false positives from unrelated toolbars).
  */
 export function isGenerating(root = document) {
-  const btns = root.querySelectorAll(
-    'button[aria-label*="Stop" i], button[mattooltip*="Stop" i], [role="button"][aria-label*="Stop" i]',
-  );
+  const btns = root.querySelectorAll(ADAPTER.stopSelector);
   for (const b of btns) {
     if (b.offsetParent !== null || (typeof b.getClientRects === "function" && b.getClientRects().length > 0)) {
       return true;
@@ -272,59 +306,36 @@ export function isGenerating(root = document) {
   return false;
 }
 
-// Candidate selectors for the model-name label in Gemini's header (e.g.
-// "Flash", "Pro"). Tunable against the live site.
-const MODEL_SELECTORS = [
-  '[data-test-id="bard-mode-menu-button"]',
-  "bard-mode-switcher button",
-  '[aria-label*="model" i] .logo-pill-label-container',
-  ".logo-pill-label-container",
-];
-
-/** Best-effort read of the active Gemini model name → e.g. "gemini-flash". */
+/**
+ * Best-effort read of the active model name for the log row — e.g.
+ * "gemini-flash", "chatgpt-5-thinking". Selectors and the label→slug mapping are
+ * per-site (site-adapter.js).
+ */
 export function getModel(root = document) {
-  for (const sel of MODEL_SELECTORS) {
+  for (const sel of ADAPTER.modelSelectors) {
     const el = root.querySelector(sel);
     const txt = el && (el.innerText || el.textContent || "").trim();
-    if (txt) {
-      const m = txt.match(/\b(flash|pro|ultra|nano|advanced|thinking)\b/i);
-      if (m) return "gemini-" + m[1].toLowerCase();
-    }
+    const model = txt && ADAPTER.normalizeModel(txt);
+    if (model) return model;
   }
-  // Fallback: scan the header for a known tier word.
-  const hdr = (root.body && root.body.innerText) || "";
-  const m = hdr.slice(0, 400).match(/\b(flash|pro|ultra|nano)\b/i);
-  return m ? "gemini-" + m[1].toLowerCase() : "gemini";
+  // Last resort: scan the top of the page for a tier word. Only sites whose
+  // HEADER carries the model opt in — on ChatGPT the body is the transcript, so a
+  // "pro"/"mini" inside a reply would be logged as the model.
+  if (ADAPTER.modelBodyPattern) {
+    const hdr = (root.body && root.body.innerText) || "";
+    const m = hdr.slice(0, 400).match(ADAPTER.modelBodyPattern);
+    const model = m && ADAPTER.normalizeModel(m[1]);
+    if (model) return model;
+  }
+  return ADAPTER.fallbackModel;
 }
 
-// Candidate selectors for the assistant's rendered response text. Tunable.
-// `resolveResponseEls` returns the FIRST selector that has any matches, so
-// gemini.google.com selectors stay first; the Google Workspace side-panel
-// (appsElements) selectors follow. The Workspace assistant reply lives in
-// `.appsElementsSidekickAgentMessageBubbleContent` ("Agent" = Gemini, not the
-// user's own bubble) — verified live 2026-07-21 in Docs; shared across the
-// Workspace side-panel apps. Without these, Workspace turns log an empty
-// response ("(none)") because the gemini.google.com selectors don't match.
-const RESPONSE_SELECTORS = [
-  // gemini.google.com
-  "message-content .markdown",
-  ".model-response-text .markdown",
-  ".model-response-text",
-  "message-content",
-  ".response-container .markdown",
-  // Google Workspace side panel (Gmail/Docs/Sheets/Slides — appsElements).
-  // Exact class first, then a substring match to catch per-app class variants.
-  ".appsElementsSidekickAgentMessageBubbleContent",
-  "[class*='SidekickAgentMessageBubbleContent']",
-  "[class*='SidekickAgentMessage']",
-  ".appsElementsSidekickAgentMessageRoot",
-];
-
 /**
- * Resolve the assistant-response node list via the explicit RESPONSE_SELECTORS.
- * These are STABLE, semantic selectors: gemini.google.com's response markup and
- * Docs/Sheets/Slides' `appsElements` agent-message classes. Returns the first
- * selector that hits, else [].
+ * Resolve the assistant-response node list via the site's explicit response
+ * selectors (site-adapter.js). These are STABLE, semantic selectors:
+ * gemini.google.com's response markup, Docs/Sheets/Slides' `appsElements`
+ * agent-message classes, ChatGPT's `data-message-author-role="assistant"`.
+ * Returns the first selector that hits, else [].
  *
  * NOTE — deliberately NO generic/role-based fallback. Apps like Gmail render the
  * Gemini feed with OBFUSCATED, per-build-rotating class names AND interleave
@@ -338,7 +349,7 @@ const RESPONSE_SELECTORS = [
  * actual control — works on every surface regardless.
  */
 function resolveResponseEls(root) {
-  for (const sel of RESPONSE_SELECTORS) {
+  for (const sel of ADAPTER.responseSelectors) {
     const els = root.querySelectorAll(sel);
     if (els.length) return els;
   }
