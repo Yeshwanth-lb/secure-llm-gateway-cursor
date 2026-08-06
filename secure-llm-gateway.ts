@@ -30,6 +30,11 @@ export type {
   RedactResult,
   CharCount,
   LogEntry,
+  RiskCategory,
+  CategoryAction,
+  AnalyzerVerdict,
+  AnalyzerResult,
+  AnalyzerLog,
 } from "./src/contracts.ts";
 export type { GatewayConfig } from "./src/config.ts";
 export { loadConfig } from "./src/config.ts";
@@ -60,6 +65,24 @@ export {
 } from "./src/openai-anthropic-shim.ts";
 export { resolveRoute, buildForwardHeaders } from "./src/routing.ts";
 export { trafficLog } from "./src/traffic-log.ts";
+export { securityLog } from "./src/security-log.ts";
+export type { SecurityLogEntry } from "./src/security-log.ts";
+export {
+  analyze,
+  tier1IsTrivial,
+  setPromptClassifier,
+  resetPromptClassifier,
+  type ClassifyFn,
+  type ClassifierVerdict,
+} from "./src/prompt-analyzer.ts";
+export { classifyViaAnthropic, parseClassifierJson } from "./src/prompt-classifier.ts";
+export {
+  GUIDANCE,
+  GUIDANCE_PREFIX,
+  buildGuidance,
+  templateIdsFor,
+  hasBlockCategory,
+} from "./src/guidance.ts";
 export { proxyRequest } from "./src/proxy.ts";
 export { dispatch, handleMcpHttp, isMcpPath } from "./src/mcp.ts";
 export { createGatewayServer } from "./src/server.ts";

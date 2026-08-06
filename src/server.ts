@@ -10,6 +10,10 @@ import { resolveRoute } from "./routing.ts";
 import { proxyRequest } from "./proxy.ts";
 import { getActiveRuleInfo, redactText, redactJson } from "./redaction.ts";
 import { trafficLog, setTrafficListener } from "./traffic-log.ts";
+import { securityLog, type SecurityLogEntry } from "./security-log.ts";
+import { analyze, type ClassifyFn } from "./prompt-analyzer.ts";
+import { classifyViaAnthropic } from "./prompt-classifier.ts";
+import { buildGuidance, hasBlockCategory } from "./guidance.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
 import { handleControlApi, isApiPath } from "./control-api.ts";
@@ -227,7 +231,8 @@ async function handleRequest(
   // extension service-worker origin (chrome-extension://) — see isExtensionOrigin.
   const hookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
   const controlPath =
-    path === "/logs" || path === "/rules" || hookPath ||
+    path === "/logs" || path === "/rules" || path === "/security-log" ||
+    path === "/prompt-guard" || hookPath ||
     isApiPath(path) || isMcpPath(path) || isAdminPath(path);
   if (
     controlPath &&
@@ -248,6 +253,22 @@ async function handleRequest(
   }
   if (method === "GET" && path === "/rules") {
     sendJson(res, 200, { rules: getActiveRuleInfo() });
+    return;
+  }
+  // Raw prompt-guard security log (Checkpoint 1). MAY contain raw prompt text +
+  // exact guidance, so it is stricter than /logs: when an admin token is
+  // configured it MUST be presented (loopback origin alone is not enough).
+  if (method === "GET" && path === "/security-log") {
+    if (config.adminToken !== "") {
+      const t = req.headers["x-gateway-token"];
+      const tok = Array.isArray(t) ? t[0] : t;
+      if (tok !== config.adminToken) {
+        sendJson(res, 403, { error: "admin token required for the security log" });
+        return;
+      }
+    }
+    const n = Number(url.searchParams.get("limit") ?? 100);
+    sendJson(res, 200, { entries: securityLog.recent(Number.isFinite(n) ? n : 100) });
     return;
   }
 
@@ -453,7 +474,99 @@ async function handleRequest(
     // Either way the flag makes the leak visible rather than silent; see contracts.ts.
     if (body.unchecked === true || attachmentLeaked) entry.unchecked = true;
     trafficLog.push(entry);
+    // Back-fill Cursor's model reply onto the matching flagged prompt-guard row in
+    // the SECURITY log, so a reviewer sees prompt + guidance + output in ONE record
+    // even though Cursor's reply is off-wire. Scoped to Cursor turns; correlates by
+    // prompt text (the two Cursor hooks share no turn id). Stores the REDACTED reply
+    // (`redResponse`), matching the claude-code path. No-op if nothing matches.
+    if (source.startsWith("cursor")) {
+      securityLog.attachResponse("cursor-hook", rawPrompt, redResponse);
+    }
     sendJson(res, 200, { logged: true, piiDetected });
+    return;
+  }
+
+  // Prompt-guard decision endpoint for the CURSOR surface (Checkpoint 1, Build 2).
+  // Cursor traffic is NOT on the gateway wire, so the Cursor beforeSubmitPrompt
+  // hook (`scripts/cursor-prompt-guard-hook.mjs`) POSTs the prompt here; we run
+  // the SAME analyzer as the Claude Code proxy path, log the decision to the
+  // admin-gated security log (surface: cursor-hook), and return the verdict.
+  //
+  // The hook can only ALLOW/BLOCK (Cursor's beforeSubmitPrompt is block-only —
+  // it cannot inject context; verified 2026-08-05). The Cursor guidance INJECTION
+  // is delivered separately by static `.cursor/rules/` (generated from the SAME
+  // `src/guidance.ts`), so this endpoint is effectively LOG + severe-block only.
+  // v1 has no active block category, so it logs and returns block:false.
+  //
+  // Tier-2 reuses the gateway's OWN configured Anthropic key + upstream — Cursor
+  // sends no per-request auth here, unlike the Claude Code path which reuses the
+  // request's own auth. No key configured => Tier-1 only (documented degrade).
+  //
+  // FAIL-OPEN (deliberate inverse of PII redaction, which fails CLOSED): any error
+  // returns allow / block:false. A missed injection = no guidance, never a dropped
+  // Cursor send. NEVER writes the raw prompt to the PII-safe traffic log.
+  if (method === "POST" && path === "/prompt-guard") {
+    const allowResp = { verdict: "allow", categories: [], block: false, guidance: "" };
+    if (!config.promptGuardEnabled) {
+      sendJson(res, 200, allowResp);
+      return;
+    }
+    let prompt = "";
+    let surface: SecurityLogEntry["surface"] = "cursor-hook";
+    try {
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      if (j && typeof j.prompt === "string") prompt = j.prompt;
+      if (j && (j.surface === "cursor-rules" || j.surface === "cursor-hook")) surface = j.surface;
+    } catch {
+      /* empty/invalid -> nothing to analyze */
+    }
+    try {
+      let classify: ClassifyFn | undefined;
+      if (config.promptGuardTier2 && config.anthropicApiKey) {
+        classify = classifyViaAnthropic({
+          upstreamBase: config.upstreams.anthropic,
+          headers: {
+            "x-api-key": config.anthropicApiKey,
+            "anthropic-version": config.anthropicVersion,
+          },
+          model: config.promptGuardModel,
+          timeoutMs: config.promptGuardTimeoutMs,
+        });
+      }
+      const verdict = await analyze(prompt, {
+        tier2Enabled: config.promptGuardTier2,
+        classify,
+        timeoutMs: config.promptGuardTimeoutMs,
+      });
+      if (verdict.verdict === "allow") {
+        sendJson(res, 200, { verdict: "allow", categories: [], block: false, guidance: "" });
+        return;
+      }
+      const guidance = buildGuidance(verdict.categories);
+      const block = verdict.verdict === "block" && hasBlockCategory(verdict.categories);
+      // RAW prompt + exact guidance -> admin-gated security log ONLY (never the
+      // PII-safe traffic log). Mirrors the Claude Code path's securityLog.push.
+      securityLog.push({
+        id: randomUUID(),
+        timestamp: new Date().toISOString(),
+        surface,
+        verdict: verdict.verdict,
+        categories: verdict.categories,
+        confidence: verdict.confidence,
+        tier: verdict.tier,
+        rawPrompt: prompt,
+        guidance: block ? "" : guidance,
+        provider: "cursor",
+      });
+      sendJson(res, 200, {
+        verdict: verdict.verdict,
+        categories: verdict.categories,
+        block,
+        guidance: block ? "" : guidance,
+      });
+    } catch {
+      sendJson(res, 200, allowResp);
+    }
     return;
   }
 

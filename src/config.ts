@@ -40,6 +40,16 @@ export interface GatewayConfig {
   adminEnabled: boolean;
   /** SQLite file backing the admin subsystem (events, config, users, audit). */
   adminDbPath: string;
+  /** Prompt-guard (Checkpoint 1) master switch. Ships DARK (default off): analyze
+   *  the prompt for security/safety risk and inject guidance into `system[]`. */
+  promptGuardEnabled: boolean;
+  /** Tier-2 (LLM classifier) enable. Default ON — required for safety detection;
+   *  off => only Tier-1 skipping runs and effectively no safety cases are caught. */
+  promptGuardTier2: boolean;
+  /** Model id used for the Tier-2 classifier call (a small/fast Claude model). */
+  promptGuardModel: string;
+  /** Hard timeout (ms) for the Tier-2 classifier call. Analyzer fails open past it. */
+  promptGuardTimeoutMs: number;
 }
 
 // Cursor exposes ONE global "Override OpenAI Base URL", so a single gateway
@@ -149,6 +159,17 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
           : !(process.execArgv.includes("--test") || process.env.NODE_ENV === "test"),
     adminDbPath:
       process.env.GATEWAY_ADMIN_DB ?? join(homedir(), ".secure-llm-gateway", "admin.db"),
+    // Prompt guard ships DARK: on only when GATEWAY_PROMPT_GUARD=on. Tier-2 is on
+    // unless GATEWAY_PROMPT_GUARD_TIER2=off (safety detection needs it).
+    promptGuardEnabled: process.env.GATEWAY_PROMPT_GUARD === "on",
+    promptGuardTier2: process.env.GATEWAY_PROMPT_GUARD_TIER2 !== "off",
+    promptGuardModel: process.env.GATEWAY_PROMPT_GUARD_MODEL ?? "claude-haiku-4-5-20251001",
+    // Measured live (2026-08-05): a real Claude Haiku classifier round-trip is
+    // 1.2–2.4s. The PRD's ~600ms budget makes Tier-2 ALWAYS time out -> fail open
+    // -> the guard is silently inert. Default raised to 4000ms so Tier-2 actually
+    // completes; the cost is ~1.5–2.5s added latency on non-trivial (Tier-1-hit)
+    // prompts before forwarding. Lower it only with a faster classifier model.
+    promptGuardTimeoutMs: toInt(process.env.GATEWAY_PROMPT_GUARD_TIMEOUT_MS, 4000),
   };
   const merged: GatewayConfig = {
     ...base,

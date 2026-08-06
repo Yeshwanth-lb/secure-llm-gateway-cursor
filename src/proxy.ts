@@ -8,7 +8,7 @@ import https from "node:https";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GatewayConfig } from "./config.ts";
-import type { Provider, RouteResult, LogEntry } from "./contracts.ts";
+import type { Provider, RouteResult, LogEntry, AnalyzerLog } from "./contracts.ts";
 import { buildForwardHeaders } from "./routing.ts";
 import { redactJson, redactText } from "./redaction.ts";
 import { StreamRedactor } from "./stream-redactor.ts";
@@ -16,6 +16,10 @@ import { trafficLog } from "./traffic-log.ts";
 import { extractUserPrompt, extractAssistantOutput } from "./clean-view.ts";
 import { sendJson } from "./http-utils.ts";
 import { extractModel, isModelBlocked } from "./model-policy.ts";
+import { analyze, type ClassifyFn } from "./prompt-analyzer.ts";
+import { classifyViaAnthropic } from "./prompt-classifier.ts";
+import { buildGuidance, hasBlockCategory, templateIdsFor } from "./guidance.ts";
+import { securityLog, type SecurityLogEntry } from "./security-log.ts";
 import {
   openaiToAnthropicRequest,
   anthropicToOpenAIResponse,
@@ -86,6 +90,49 @@ function sanitizeEmptyBlocks(obj: unknown): boolean {
     }
   }
   return changed;
+}
+
+/**
+ * Append a guidance block to the request's SYSTEM channel — NEVER the user's
+ * message text (checkpoint.md §6). Existing system entries are preserved in order
+ * (no-clobber). Best-effort per provider; on any parse failure the body is
+ * returned UNCHANGED (fail open — a guidance layer must never drop a request).
+ */
+function injectGuidance(bodyText: string, provider: Provider, guidance: string): string {
+  if (!guidance) return bodyText;
+  let obj: any;
+  try {
+    obj = JSON.parse(bodyText);
+  } catch {
+    return bodyText; // non-JSON body -> nothing to inject into, leave as-is
+  }
+  if (!obj || typeof obj !== "object") return bodyText;
+  const block = { type: "text", text: guidance };
+  try {
+    if (provider === "anthropic") {
+      if (Array.isArray(obj.system)) obj.system = [...obj.system, block];
+      else if (typeof obj.system === "string") obj.system = `${obj.system}\n\n${guidance}`;
+      else obj.system = [block];
+    } else if (provider === "gemini") {
+      const si = obj.systemInstruction ?? obj.system_instruction ?? {};
+      const parts = Array.isArray(si.parts) ? [...si.parts, { text: guidance }] : [{ text: guidance }];
+      obj.systemInstruction = { ...si, parts };
+      delete obj.system_instruction;
+    } else {
+      // openai-compatible: a leading system message. Append to an existing one,
+      // else prepend a new system message ahead of the conversation.
+      const msgs = Array.isArray(obj.messages) ? obj.messages : [];
+      if (msgs[0] && msgs[0].role === "system" && typeof msgs[0].content === "string") {
+        msgs[0] = { ...msgs[0], content: `${msgs[0].content}\n\n${guidance}` };
+      } else {
+        msgs.unshift({ role: "system", content: guidance });
+      }
+      obj.messages = msgs;
+    }
+    return JSON.stringify(obj);
+  } catch {
+    return bodyText; // any failure -> forward the original, unmodified
+  }
 }
 
 /** Scrub a body toward the given direction; JSON deep-walked, else raw text.
@@ -201,6 +248,15 @@ export async function proxyRequest(
   // id. `model` still holds the resolved id for policy checks, forwarding, logs.
   const clientModel = rawModel;
 
+  // Prompt-guard (Checkpoint 1) decision metadata for this request, filled in
+  // below when the analyzer runs. PII-safe (no raw prompt / no guidance body) —
+  // those go to the admin-gated securityLog. Captured here so recordEntry can
+  // stamp it onto whichever LogEntry the request ultimately produces.
+  let analyzerMeta: AnalyzerLog | undefined;
+  // Held reference to this request's security-log entry (if the guard acted), so
+  // recordEntry can back-fill the model's response once the turn completes.
+  let secEntry: SecurityLogEntry | undefined;
+
   // Log-entry builder (takes the inbound scrub result explicitly so it can be
   // called from the translate preamble, before the main inbound scrub runs).
   const recordEntry = (
@@ -240,7 +296,16 @@ export async function proxyRequest(
         userPrompt: extractUserPrompt(inb.text),
         assistantOutput: extractAssistantOutput(logProvider, respText),
       },
+      analyzer: analyzerMeta,
     };
+    // Back-fill the model's (redacted) reply onto the security-log record so a
+    // reviewer sees prompt + guidance + output together. Store the DISTILLED
+    // assistant text (not the raw JSON/SSE envelope) so the dashboard shows clean
+    // code, not a wire payload. Raw PII never persists here either.
+    if (secEntry) {
+      const clean = extractAssistantOutput(logProvider, respText);
+      secEntry.response = snap(clean, config.snapshotChars);
+    }
     trafficLog.push(entry);
   };
 
@@ -274,6 +339,108 @@ export async function proxyRequest(
         error: { message: `Invalid request: ${(e as Error).message}`, type: "invalid_request_error" },
       });
       return;
+    }
+  }
+
+  // --- prompt guard (Checkpoint 1): analyze -> steer via system channel ------
+  // Runs AFTER model resolution / translate preamble and BEFORE the inbound
+  // scrub, so guidance is injected into the SAME body that gets scrubbed +
+  // forwarded. Analyzer FAILS OPEN (never throws) — a miss means no guidance,
+  // never a dropped request. Never touches the user's message text. Anthropic-
+  // only Tier-2 in v1 (the Claude Code wire); other providers get Tier-1 only.
+  if (config.promptGuardEnabled) {
+    const rawPrompt = extractUserPrompt(bodyText);
+    // extractUserPrompt returns a "(…)" placeholder when there is no real user
+    // text (e.g. a non-chat body) — treat those as nothing to analyze.
+    const analyzable = rawPrompt && !rawPrompt.startsWith("(");
+    if (analyzable) {
+      // Tier-2 reuses the request's OWN upstream + auth (no new key). v1: only
+      // the native Anthropic path (Claude Code). A test-installed module
+      // classifier, if any, overrides this inside analyze().
+      let classify: ClassifyFn | undefined;
+      if (config.promptGuardTier2 && fwdRoute.provider === "anthropic") {
+        const gh: Record<string, string> = {};
+        const pick = (k: string): string | undefined => {
+          const v = req.headers[k];
+          return Array.isArray(v) ? v[0] : v;
+        };
+        if (translating) {
+          const bearer = (pick("authorization") ?? "").replace(/^Bearer\s+/i, "");
+          const key = config.anthropicApiKey || bearer;
+          if (key) gh["x-api-key"] = key;
+        } else {
+          const xk = pick("x-api-key");
+          if (xk) gh["x-api-key"] = xk;
+          const auth = pick("authorization");
+          if (auth) gh["authorization"] = auth;
+        }
+        gh["anthropic-version"] = pick("anthropic-version") ?? config.anthropicVersion;
+        classify = classifyViaAnthropic({
+          upstreamBase: fwdRoute.upstreamBase,
+          headers: gh,
+          model: config.promptGuardModel,
+          timeoutMs: config.promptGuardTimeoutMs,
+        });
+      }
+      const verdict = await analyze(rawPrompt, {
+        tier2Enabled: config.promptGuardTier2,
+        classify,
+        timeoutMs: config.promptGuardTimeoutMs,
+      });
+      if (verdict.verdict !== "allow") {
+        const guidance = buildGuidance(verdict.categories);
+        const isBlock = verdict.verdict === "block" && hasBlockCategory(verdict.categories);
+        analyzerMeta = {
+          verdict: verdict.verdict,
+          categories: verdict.categories,
+          confidence: verdict.confidence,
+          tier: verdict.tier,
+          guidanceInjected: !isBlock && guidance !== "",
+          templateIds: templateIdsFor(verdict.categories),
+          latencyMs: verdict.latencyMs,
+          surface: "claude-code",
+        };
+        // RAW prompt + exact guidance -> admin-gated security log only. Held by
+        // reference so recordEntry can add the model's response after the turn.
+        secEntry = {
+          id: randomUUID(),
+          timestamp: new Date().toISOString(),
+          surface: "claude-code",
+          verdict: verdict.verdict,
+          categories: verdict.categories,
+          confidence: verdict.confidence,
+          tier: verdict.tier,
+          rawPrompt,
+          guidance: isBlock ? "" : guidance,
+          provider: fwdRoute.provider,
+          model,
+        };
+        securityLog.push(secEntry);
+        if (isBlock) {
+          // Severe category (reserved set) — short-circuit with a refusal; nothing
+          // forwarded. v1 keeps this dormant (no active block category).
+          const inb = scrub(bodyText, reqCt, "inbound");
+          recordEntry(403, false, "", inb, {}, true);
+          sendJson(res, 403, {
+            error: "Request blocked by prompt-guard policy",
+            categories: verdict.categories,
+          });
+          return;
+        }
+        // Steer: inject guidance into the system channel of the body to forward.
+        bodyText = injectGuidance(bodyText, fwdRoute.provider, guidance);
+      } else {
+        analyzerMeta = {
+          verdict: "allow",
+          categories: [],
+          confidence: verdict.confidence,
+          tier: verdict.tier,
+          guidanceInjected: false,
+          templateIds: [],
+          latencyMs: verdict.latencyMs,
+          surface: "claude-code",
+        };
+      }
     }
   }
 

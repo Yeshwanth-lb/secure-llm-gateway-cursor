@@ -16,6 +16,7 @@ import { authFromRequest, jwtSecret, signJWT, verifyPassword, allowLoginAttempt 
 import { listRules, setRuleEnabled, redactText } from "./redaction.ts";
 import { handleControlApi } from "./control-api.ts";
 import { trafficLog } from "./traffic-log.ts";
+import { securityLog } from "./security-log.ts";
 import { cleanEntry } from "./clean-view.ts";
 
 export function isAdminPath(path: string): boolean {
@@ -218,6 +219,25 @@ export function handleAdminApi(
       const entries = trafficLog.recent(100, false);
       const clean = url.searchParams.get("clean") === "1";
       sendJson(res, 200, { entries: clean ? entries.map(cleanEntry) : entries });
+      return true;
+    }
+
+    // --- Prompt Guard (Checkpoint 1) — flagged prompts + guidance + output ----
+    // Reads the admin-gated security log: raw prompt, exact guidance injected, and
+    // the model's (redacted) reply. JWT-gated here, same as every /admin/api/*.
+    if (method === "GET" && path === "/admin/api/prompt-guard") {
+      const n = Number(url.searchParams.get("limit")) || 100;
+      const entries = securityLog.recent(Number.isFinite(n) ? n : 100);
+      const byCategory: Record<string, number> = {};
+      let injected = 0;
+      for (const e of entries) {
+        if (e.guidance) injected++;
+        for (const c of e.categories) byCategory[c] = (byCategory[c] ?? 0) + 1;
+      }
+      sendJson(res, 200, {
+        entries,
+        summary: { total: entries.length, injected, byCategory },
+      });
       return true;
     }
 

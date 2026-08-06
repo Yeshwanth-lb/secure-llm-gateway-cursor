@@ -23,6 +23,7 @@ import {
   signJWT,
   verifyJWT,
   resetLoginRate,
+  securityLog,
 } from "../secure-llm-gateway.ts";
 
 const PW = "s3cret-" + "password";
@@ -222,4 +223,36 @@ test("edge: /internal/config carries the mode an extension enforces (block/off/r
   // off -> redaction disabled for that surface (raw allowed); redact -> normal.
   await J("/admin/api/surfaces/grok", { method: "PUT", headers: auth(token), body: { mode: "off" } });
   assert.equal((await (await J("/internal/config/grok")).json()).mode, "off");
+});
+
+// --- 4. PROMPT GUARD (Checkpoint 1) ----------------------------------------
+test("prompt-guard: JWT-gated tab data returns prompt + guidance + model output", async () => {
+  resetLoginRate();
+  securityLog.clear();
+  securityLog.push({
+    id: "pg-test-1",
+    timestamp: new Date().toISOString(),
+    surface: "claude-code",
+    verdict: "inject",
+    categories: ["sql_injection"],
+    confidence: 0.9,
+    tier: 2,
+    rawPrompt: "build a SQL query for " + RAW_EMAIL,
+    guidance: "[SECURITY & SAFETY GUIDANCE] Use parameterized queries.",
+    response: "Here is a parameterized query using ? placeholders.",
+    provider: "anthropic",
+    model: "claude-haiku-4-5-20251001",
+  });
+  // gated: no token -> 401.
+  assert.equal((await J("/admin/api/prompt-guard")).status, 401);
+  const token = await login();
+  const r = await J("/admin/api/prompt-guard", { headers: auth(token) });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.entries.length, 1);
+  assert.equal(j.entries[0].verdict, "inject");
+  assert.match(j.entries[0].guidance, /parameterized/i);
+  assert.match(j.entries[0].response, /parameterized query/i, "model output is exposed to the dashboard");
+  assert.equal(j.summary.injected, 1);
+  assert.equal(j.summary.byCategory.sql_injection, 1);
 });

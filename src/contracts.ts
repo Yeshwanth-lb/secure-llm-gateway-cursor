@@ -57,4 +57,53 @@ export interface LogEntry {
    *  body at capture time (so it survives snapshot truncation on huge requests).
    *  Optional: absent on hook/audit entries and older log entries. */
   clean?: { userPrompt: string; assistantOutput: string };
+  /** Prompt-guard (Checkpoint 1) decision METADATA — never raw prompt text. The
+   *  raw prompt + exact guidance live only in the admin-gated security log
+   *  (`src/security-log.ts`). Present only when the analyzer ran on this request. */
+  analyzer?: AnalyzerLog;
+}
+
+// ===== PROMPT-GUARD CONTRACTS (Checkpoint 1) =================================
+// The shared analyzer's verdict + the metadata recorded per decision. Detection
+// is WIDE (security code + data/agent + safety), the response is one mechanism
+// (steer via guidance). See checkpoint.md.
+
+export type RiskCategory =
+  // Security — code
+  | "sql_injection" | "command_injection" | "insecure_deserialization"
+  | "hardcoded_secret" | "missing_auth"
+  // Security — implementation-risk (neutral-sounding feature requests whose naive
+  // implementation is vulnerable; added 2026-08-06 to raise recall)
+  | "xss" | "ssrf" | "idor" | "path_traversal" | "open_redirect" | "weak_crypto"
+  // Security — data / agent
+  | "data_leakage" | "prompt_injection" | "exfiltration"
+  // Safety
+  | "harmful_content" | "harassment_abuse" | "social_engineering" | "policy_violation";
+
+/** Per-category response. v1 sets nearly all to "inject"; "block" is reserved for
+ *  the severe set (defined so a hard-refuse category needs no re-architecting). */
+export type CategoryAction = "inject" | "block";
+
+export type AnalyzerVerdict = "allow" | "inject" | "block";
+
+export interface AnalyzerResult {
+  verdict: AnalyzerVerdict;
+  categories: RiskCategory[];
+  confidence: number;
+  tier: 1 | 2; // which tier produced the verdict (1 = regex/skip, 2 = LLM)
+  latencyMs: number;
+}
+
+/** Metadata-only view of an analyzer decision stored on a (PII-safe) LogEntry.
+ *  Deliberately excludes the raw prompt and the guidance body — those go to the
+ *  admin-gated security log, never here. */
+export interface AnalyzerLog {
+  verdict: AnalyzerVerdict;
+  categories: RiskCategory[];
+  confidence: number;
+  tier: 1 | 2;
+  guidanceInjected: boolean;
+  templateIds: string[];
+  latencyMs: number;
+  surface: "claude-code" | "cursor-rules" | "cursor-hook";
 }

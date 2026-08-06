@@ -160,6 +160,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     <button class="tab" data-tab="rules">Rules</button>
     <button class="tab" data-tab="allowlist">Allowlist</button>
     <button class="tab" data-tab="models">Model Policy</button>
+    <button class="tab" data-tab="guard">Prompt Guard</button>
     <button class="tab" data-tab="traffic">Traffic</button>
     <button class="tab" data-tab="try">Try Redaction</button>
     <button class="tab" data-tab="audit">Audit Log</button>
@@ -232,6 +233,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <section id="tab-guard" class="hidden">
+      <div class="row-controls"><button id="gRefresh">Refresh</button><span class="muted">prompt-guard decisions — flagged prompt, guidance injected, and the model output it produced (admin-only, may contain raw prompt text)</span></div>
+      <div class="cards" id="gCards"></div>
+      <div class="panel"><table id="guardTable"><thead><tr><th>Time</th><th>Verdict</th><th>Categories</th><th>Conf</th><th>Surface</th><th>Prompt (click row for full detail + output)</th></tr></thead><tbody></tbody></table></div>
+    </section>
+
     <section id="tab-traffic" class="hidden">
       <div class="row-controls"><button id="tRefresh">Refresh</button><span class="muted">last 100 requests (post-redaction snapshots only)</span></div>
       <div class="panel"><table id="trafficTable"><thead><tr><th>Time</th><th>Provider</th><th>Method</th><th>Source/Path</th><th>Status</th><th>PII</th><th>Rules (in/out)</th><th>Chars</th></tr></thead><tbody></tbody></table></div>
@@ -285,12 +292,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     b.addEventListener("click", function(){
       Array.prototype.forEach.call(document.querySelectorAll(".tab"), function(x){ x.classList.remove("active"); });
       b.classList.add("active");
-      ["analytics","controls","rules","allowlist","models","traffic","try","audit"].forEach(function(t){ el("tab-"+t).classList.toggle("hidden", t!==b.dataset.tab); });
+      ["analytics","controls","rules","allowlist","models","guard","traffic","try","audit"].forEach(function(t){ el("tab-"+t).classList.toggle("hidden", t!==b.dataset.tab); });
       var t=b.dataset.tab;
       if (t==="controls") loadControls();
       if (t==="audit") loadAudit();
       if (t==="analytics") loadAnalytics();
       if (t==="rules"||t==="allowlist"||t==="models") loadConsole();
+      if (t==="guard") loadGuard();
       if (t==="traffic") loadTraffic();
     });
   });
@@ -483,6 +491,41 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     if (el("app").classList.contains("hidden")) return;
     if (!el("tab-traffic").classList.contains("hidden")) loadTraffic();
   }, 2000);
+
+  // --- Prompt Guard (Checkpoint 1) — click a row to see prompt/guidance/output
+  var guardExpanded = {};
+  function loadGuard(){
+    api("/admin/api/prompt-guard").then(function(j){
+      var s=j.summary||{byCategory:{}};
+      var cats=Object.keys(s.byCategory||{}).sort(function(a,b){return s.byCategory[b]-s.byCategory[a];});
+      el("gCards").innerHTML = card(s.total||0,"flagged prompts") + card(s.injected||0,"guidance injected") +
+        cats.slice(0,4).map(function(c){ return card(s.byCategory[c],c); }).join("");
+      var tb=el("guardTable").querySelector("tbody"); tb.innerHTML="";
+      if(!j.entries.length){ tb.innerHTML='<tr><td colspan="6" class="muted">no prompt-guard activity yet — flagged prompts appear here</td></tr>'; return; }
+      j.entries.forEach(function(e){
+        var vpill = e.verdict==="block" ? "bad" : (e.verdict==="inject" ? "warn" : "");
+        var main=document.createElement("tr"); main.style.cursor="pointer";
+        main.innerHTML="<td class='muted'>"+esc(new Date(e.timestamp).toLocaleTimeString())+"</td>"+
+          "<td><span class='pill "+vpill+"'>"+esc(e.verdict)+"</span></td>"+
+          "<td class='muted' style='font-size:11px'>"+esc((e.categories||[]).join(", "))+"</td>"+
+          "<td class='muted'>"+(e.confidence!=null?Math.round(e.confidence*100)+"%":"")+"</td>"+
+          "<td class='muted' style='font-size:11px'>"+esc(e.surface||"")+"</td>"+
+          "<td class='muted' style='max-width:460px;word-break:break-word'>"+esc(String(e.rawPrompt||"").slice(0,160))+"</td>";
+        var det=document.createElement("tr"); if(!guardExpanded[e.id]) det.classList.add("hidden");
+        var pane=function(title,body){ return "<div style='flex:1;min-width:260px'><div class='muted' style='font-size:11px;margin-bottom:4px'>"+title+"</div><pre style='white-space:pre-wrap;word-break:break-word;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;margin:0;max-height:340px;overflow:auto'>"+(esc(body)||"<span class='muted'>(none)</span>")+"</pre></div>"; };
+        det.innerHTML="<td colspan='6' style='background:var(--bg)'><div class='flex'>"+
+          pane("prompt (raw)",e.rawPrompt)+pane("guidance injected",e.guidance)+pane("model output (what it generated)",e.response||"")+"</div></td>";
+        main.addEventListener("click", function(){ det.classList.toggle("hidden"); guardExpanded[e.id]=!det.classList.contains("hidden"); });
+        tb.appendChild(main); tb.appendChild(det);
+      });
+    }).catch(function(){});
+  }
+  el("gRefresh").addEventListener("click", loadGuard);
+  // Auto-refresh the Prompt Guard tab while visible + logged in (like Traffic).
+  setInterval(function(){
+    if (el("app").classList.contains("hidden")) return;
+    if (!el("tab-guard").classList.contains("hidden")) loadGuard();
+  }, 3000);
 
   // --- Try Redaction ---------------------------------------------------------
   el("tryRun").addEventListener("click", function(){

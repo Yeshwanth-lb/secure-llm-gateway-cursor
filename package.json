@@ -32,7 +32,8 @@
     "demo:cursor-scrub": "node scripts/demo-tool-scrub.mjs",
     "probe:firefox-upload": "node --experimental-strip-types extension/test/e2e/probe-firefox-upload.mts",
     "probe:upload-selfcheck": "node extension/test/e2e/upload-probe-selfcheck.mjs",
-    "admin:seed": "node --experimental-strip-types scripts/admin-seed.ts"
+    "admin:seed": "node --experimental-strip-types scripts/admin-seed.ts",
+    "cursor:rules": "node --experimental-strip-types scripts/gen-cursor-rules.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",

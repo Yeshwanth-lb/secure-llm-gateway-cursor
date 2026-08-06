@@ -32,7 +32,12 @@ function blockText(content: unknown): string {
  *  message suggests, would change nothing. Say what actually happened. */
 const NO_SNAPSHOT = "(no snapshot stored — counts-only audit entry, by design)";
 
-/** The real user prompt(s): user-role messages with boilerplate stripped. */
+/** The real user prompt for THIS turn: the LATEST user-role message with
+ *  boilerplate stripped. LLM requests re-send the entire conversation every
+ *  turn, so joining all user messages would show the whole growing history on
+ *  every row; we want just the new prompt the user sent this turn. Scans from the
+ *  end and returns the last message that carries real text (skipping tool-result
+ *  / empty turns). */
 export function extractUserPrompt(reqSnapshot: string): string {
   if (reqSnapshot.trim() === "") return NO_SNAPSHOT;
   let obj: any;
@@ -42,13 +47,13 @@ export function extractUserPrompt(reqSnapshot: string): string {
     return "(could not parse request — snapshot may be truncated; raise SNAPSHOT_CHARS)";
   }
   const msgs = Array.isArray(obj?.messages) ? obj.messages : [];
-  const parts: string[] = [];
-  for (const m of msgs) {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
     if (m?.role !== "user") continue;
     const cleaned = stripBoilerplate(blockText(m.content));
-    if (cleaned) parts.push(cleaned);
+    if (cleaned) return cleaned;
   }
-  return parts.join("\n\n---\n\n") || "(no user text found)";
+  return "(no user text found)";
 }
 
 /** The assistant output: concatenated text deltas (SSE) or message text (JSON). */

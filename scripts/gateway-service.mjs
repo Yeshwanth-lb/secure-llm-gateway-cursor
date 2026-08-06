@@ -17,6 +17,7 @@ import {
   readJsonSafe, writeJson, log, getJson, killPortListener, MCP_SERVER_NAME,
   stripClaudeGatewayHooks,
 } from "./lib.mjs";
+import { writeRules } from "./gen-cursor-rules.ts";
 
 const PID_FILE = path.join(STATE_DIR, "gateway.pid");
 const CLAUDE_HOOK = path.join(REPO_ROOT, "scripts", "claude-session-hook.mjs");
@@ -24,6 +25,7 @@ const CURSOR_HOOK = path.join(REPO_ROOT, "scripts", "cursor-gateway-hook.mjs");
 const CURSOR_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-redact-hook.mjs");
 const CURSOR_TOOL_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-tool-redact-hook.mjs");
 const CURSOR_TURN_LOG_HOOK = path.join(REPO_ROOT, "scripts", "cursor-turn-log-hook.mjs");
+const CURSOR_PROMPT_GUARD_HOOK = path.join(REPO_ROOT, "scripts", "cursor-prompt-guard-hook.mjs");
 const NODE = process.execPath;
 const NODE_ARGS = ["--experimental-strip-types", ENTRY];
 
@@ -258,6 +260,14 @@ function configureCursor() {
   // transcript. Observational, fail-open, NOT failClosed — a logging hiccup must
   // never block a session (it withholds a log line, it cannot leak).
   const turnLogHook = `${NODE} ${CURSOR_TURN_LOG_HOOK}`;
+  // Prompt-guard (Checkpoint 1, Build 2): analyze the prompt for security/safety
+  // risk, log the decision to the gateway (surface: cursor-hook), severe-block
+  // only. FAIL-OPEN (NOT failClosed) — a guidance-layer miss must never drop a
+  // send. The actual guidance INJECTION is delivered by static .cursor/rules/
+  // (generated from src/guidance.ts by `npm run cursor:rules`), not this hook,
+  // because Cursor's beforeSubmitPrompt cannot add context. Runs AFTER the PII
+  // block hook so a PII deny still takes precedence.
+  const promptGuardHook = `${NODE} ${CURSOR_PROMPT_GUARD_HOOK}`;
   // No matcher: Cursor may label the server `user-secure-gateway`; the hook
   // script filters to our gateway and allows every other MCP through.
   writeJson(hooksFile, {
@@ -265,7 +275,10 @@ function configureCursor() {
     hooks: {
       sessionStart: [{ command: hook, failClosed: true }],
       beforeMCPExecution: [{ command: hook, failClosed: true }],
-      beforeSubmitPrompt: [{ command: redactHook, failClosed: true }],
+      beforeSubmitPrompt: [
+        { command: redactHook, failClosed: true },
+        { command: promptGuardHook }, // fail-open: log + severe-block only
+      ],
       beforeReadFile: [{ command: redactHook, failClosed: true }],
       beforeTabFileRead: [{ command: redactHook, failClosed: true }],
       preToolUse: [{ command: toolRedactHook, failClosed: true }],
@@ -274,11 +287,20 @@ function configureCursor() {
     },
   });
 
+  // Refresh the static .cursor/rules guidance from the single source of truth, so
+  // a reconfigure always ships the current guidance templates to Cursor.
+  try {
+    writeRules();
+  } catch (e) {
+    log(`  (warning: could not write .cursor/rules guidance — ${e.message})`);
+  }
+
   log(
     `configured Cursor: ${mcpFile} + ${hooksFile} (sessionStart + beforeMCPExecution + ` +
       `block-if-PII on beforeSubmitPrompt/beforeReadFile/beforeTabFileRead + ` +
+      `prompt-guard log/severe-block on beforeSubmitPrompt (fail-open) + ` +
       `tool-data scrub on preToolUse/postToolUse, fail-closed; ` +
-      `per-turn CHAT logging on stop, fail-open)`,
+      `per-turn CHAT logging on stop, fail-open) + .cursor/rules guidance`,
   );
 }
 
