@@ -26,6 +26,7 @@ const CURSOR_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-redact-hook.m
 const CURSOR_TOOL_REDACT_HOOK = path.join(REPO_ROOT, "scripts", "cursor-tool-redact-hook.mjs");
 const CURSOR_TURN_LOG_HOOK = path.join(REPO_ROOT, "scripts", "cursor-turn-log-hook.mjs");
 const CURSOR_PROMPT_GUARD_HOOK = path.join(REPO_ROOT, "scripts", "cursor-prompt-guard-hook.mjs");
+const CURSOR_COMMAND_GUARD_HOOK = path.join(REPO_ROOT, "scripts", "cursor-command-guard-hook.mjs");
 const NODE = process.execPath;
 const NODE_ARGS = ["--experimental-strip-types", ENTRY];
 
@@ -268,9 +269,16 @@ function configureCursor() {
   // because Cursor's beforeSubmitPrompt cannot add context. Runs AFTER the PII
   // block hook so a PII deny still takes precedence.
   const promptGuardHook = `${NODE} ${CURSOR_PROMPT_GUARD_HOOK}`;
+  // Command guard (Checkpoint 2 v1): classify a shell command the agent is about to
+  // run and deny/ask BEFORE it executes. FAIL-CLOSED (failClosed:true + the hook
+  // self-denies on any error). Wired ONLY when GATEWAY_COMMAND_GUARD=on — otherwise
+  // the beforeShellExecution hook is absent so nothing is gated (dark default; a
+  // wired hook with the gateway down would deny every shell command).
+  const commandGuardOn = process.env.GATEWAY_COMMAND_GUARD === "on";
+  const commandGuardHook = `${NODE} ${CURSOR_COMMAND_GUARD_HOOK}`;
   // No matcher: Cursor may label the server `user-secure-gateway`; the hook
   // script filters to our gateway and allows every other MCP through.
-  writeJson(hooksFile, {
+  const hooksSpec = {
     version: 1,
     hooks: {
       sessionStart: [{ command: hook, failClosed: true }],
@@ -285,7 +293,11 @@ function configureCursor() {
       postToolUse: [{ command: toolRedactHook, failClosed: true }],
       stop: [{ command: turnLogHook }],
     },
-  });
+  };
+  if (commandGuardOn) {
+    hooksSpec.hooks.beforeShellExecution = [{ command: commandGuardHook, failClosed: true }];
+  }
+  writeJson(hooksFile, hooksSpec);
 
   // Refresh the static .cursor/rules guidance from the single source of truth, so
   // a reconfigure always ships the current guidance templates to Cursor.
@@ -300,7 +312,8 @@ function configureCursor() {
       `block-if-PII on beforeSubmitPrompt/beforeReadFile/beforeTabFileRead + ` +
       `prompt-guard log/severe-block on beforeSubmitPrompt (fail-open) + ` +
       `tool-data scrub on preToolUse/postToolUse, fail-closed; ` +
-      `per-turn CHAT logging on stop, fail-open) + .cursor/rules guidance`,
+      `per-turn CHAT logging on stop, fail-open) + .cursor/rules guidance` +
+      (commandGuardOn ? " + command-guard on beforeShellExecution (fail-closed)" : ""),
   );
 }
 

@@ -354,9 +354,15 @@ export async function proxyRequest(
     // text (e.g. a non-chat body) — treat those as nothing to analyze.
     const analyzable = rawPrompt && !rawPrompt.startsWith("(");
     if (analyzable) {
-      // Tier-2 reuses the request's OWN upstream + auth (no new key). v1: only
-      // the native Anthropic path (Claude Code). A test-installed module
-      // classifier, if any, overrides this inside analyze().
+      // Tier-2 classifier auth. PREFER the gateway's OWN configured key
+      // (`config.anthropicApiKey`) — identical to the Cursor /prompt-guard path, and
+      // robust. Only FALL BACK to the request's own auth (x-api-key, then OAuth
+      // bearer) when no gateway key is configured. This fixes the Claude Code path
+      // silently failing open: a Claude *Enterprise* request carries an OAuth bearer
+      // that the extra classify call to `claude-sonnet-5` could not use, so every
+      // verdict came back `allow` (tier 2) and nothing was flagged/logged — unlike
+      // Cursor, which already used the gateway key. A test-installed module
+      // classifier, if any, still overrides all of this inside analyze().
       let classify: ClassifyFn | undefined;
       if (config.promptGuardTier2 && fwdRoute.provider === "anthropic") {
         const gh: Record<string, string> = {};
@@ -364,15 +370,14 @@ export async function proxyRequest(
           const v = req.headers[k];
           return Array.isArray(v) ? v[0] : v;
         };
-        if (translating) {
-          const bearer = (pick("authorization") ?? "").replace(/^Bearer\s+/i, "");
-          const key = config.anthropicApiKey || bearer;
-          if (key) gh["x-api-key"] = key;
-        } else {
-          const xk = pick("x-api-key");
-          if (xk) gh["x-api-key"] = xk;
-          const auth = pick("authorization");
-          if (auth) gh["authorization"] = auth;
+        const reqXk = pick("x-api-key");
+        const bearer = (pick("authorization") ?? "").replace(/^Bearer\s+/i, "");
+        // Gateway key wins; then the request's api key; then its bearer.
+        const apiKey = config.anthropicApiKey || reqXk || "";
+        if (apiKey) {
+          gh["x-api-key"] = apiKey;
+        } else if (bearer) {
+          gh["authorization"] = `Bearer ${bearer}`;
         }
         gh["anthropic-version"] = pick("anthropic-version") ?? config.anthropicVersion;
         classify = classifyViaAnthropic({

@@ -83,6 +83,8 @@ export {
   templateIdsFor,
   hasBlockCategory,
 } from "./src/guidance.ts";
+export { classifyCommand, COMMAND_CATEGORIES } from "./src/command-rules.ts";
+export type { CommandVerdict, CommandCategory, CommandPermission } from "./src/command-rules.ts";
 export { proxyRequest } from "./src/proxy.ts";
 export { dispatch, handleMcpHttp, isMcpPath } from "./src/mcp.ts";
 export { createGatewayServer } from "./src/server.ts";

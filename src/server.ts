@@ -14,6 +14,7 @@ import { securityLog, type SecurityLogEntry } from "./security-log.ts";
 import { analyze, type ClassifyFn } from "./prompt-analyzer.ts";
 import { classifyViaAnthropic } from "./prompt-classifier.ts";
 import { buildGuidance, hasBlockCategory } from "./guidance.ts";
+import { classifyCommand } from "./command-rules.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
 import { handleControlApi, isApiPath } from "./control-api.ts";
@@ -232,7 +233,7 @@ async function handleRequest(
   const hookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
   const controlPath =
     path === "/logs" || path === "/rules" || path === "/security-log" ||
-    path === "/prompt-guard" || hookPath ||
+    path === "/prompt-guard" || path === "/command-guard" || hookPath ||
     isApiPath(path) || isMcpPath(path) || isAdminPath(path);
   if (
     controlPath &&
@@ -566,6 +567,63 @@ async function handleRequest(
       });
     } catch {
       sendJson(res, 200, allowResp);
+    }
+    return;
+  }
+
+  // Command-guard decision endpoint (Checkpoint 2 v1). The Cursor
+  // `beforeShellExecution` hook and the Claude Code `PreToolUse(Bash)` hook POST
+  // the command here; we classify it deterministically (no LLM) and return a
+  // permission the hook relays to its platform. Loopback-gated above.
+  //
+  // FAIL-CLOSED (the deliberate inverse of /prompt-guard, which fails OPEN): any
+  // error, or a body we cannot read, returns `deny`. A missed classification on a
+  // destructive command is unrecoverable, so we err toward denying. When the guard
+  // is OFF (dark default), the surface hooks are not wired, but if the endpoint is
+  // reached anyway it returns `allow` (the feature is disabled — nothing to gate).
+  //
+  // Only deny/ask decisions are stored (raw command) in the admin-gated security
+  // log; a plain allow is never logged.
+  if (method === "POST" && path === "/command-guard") {
+    if (!config.commandGuardEnabled) {
+      sendJson(res, 200, { permission: "allow", category: null });
+      return;
+    }
+    try {
+      let command = "";
+      let surface: SecurityLogEntry["surface"] = "claude-code";
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      if (j && typeof j.command === "string") command = j.command;
+      if (j && j.surface === "cursor") surface = "cursor";
+      const v = classifyCommand(command);
+      if (v.permission !== "allow") {
+        securityLog.push({
+          id: randomUUID(),
+          timestamp: new Date().toISOString(),
+          kind: "command-guard",
+          surface,
+          permission: v.permission,
+          command,
+          commandCategory: v.category ?? undefined,
+          matchedPattern: v.matchedPattern ?? undefined,
+          provider: surface === "cursor" ? "cursor" : "claude-code",
+        });
+      }
+      sendJson(res, 200, {
+        permission: v.permission,
+        category: v.category,
+        user_message: v.userMessage,
+        agent_message: v.agentMessage,
+      });
+    } catch {
+      // Unreadable body / unexpected error -> DENY (fail closed).
+      sendJson(res, 200, {
+        permission: "deny",
+        category: null,
+        user_message: "Command guard error — denied by default (fail-closed).",
+        agent_message:
+          "Command Guard could not evaluate this command and denied it by default. Retry, or ask the user to run it manually if it is safe.",
+      });
     }
     return;
   }

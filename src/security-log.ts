@@ -11,15 +11,29 @@ import type { AnalyzerVerdict, RiskCategory } from "./contracts.ts";
 export interface SecurityLogEntry {
   id: string;
   timestamp: string;
-  surface: "claude-code" | "cursor-rules" | "cursor-hook";
-  verdict: AnalyzerVerdict;
-  categories: RiskCategory[];
-  confidence: number;
-  tier: 1 | 2;
+  /** Which guard produced this row. Absent = prompt-guard (Checkpoint 1) for
+   *  back-compat with existing rows. Command Guard (Checkpoint 2) sets
+   *  "command-guard" and uses the command-* fields below instead of the
+   *  prompt-guard fields. */
+  kind?: "prompt-guard" | "command-guard";
+  surface: "claude-code" | "cursor-rules" | "cursor-hook" | "cursor";
+  // --- prompt-guard fields (Checkpoint 1) — present on prompt-guard rows -------
+  verdict?: AnalyzerVerdict;
+  categories?: RiskCategory[];
+  confidence?: number;
+  tier?: 1 | 2;
   /** RAW user prompt (may contain secrets/PII) — the reason this store is gated. */
-  rawPrompt: string;
+  rawPrompt?: string;
   /** The exact guidance block injected (empty for a pure block/log decision). */
-  guidance: string;
+  guidance?: string;
+  // --- command-guard fields (Checkpoint 2) — present on command-guard rows -----
+  /** The RAW shell command the agent tried to run (why this store is gated). */
+  command?: string;
+  /** Which command category matched, and the exact rule pattern (audit detail). */
+  commandCategory?: string;
+  matchedPattern?: string;
+  /** The verdict returned to the surface hook. */
+  permission?: "allow" | "deny" | "ask";
   /** The model's reply for this turn (PII-REDACTED, same as the /logs snapshot),
    *  filled in after the turn completes. Lets a reviewer see prompt + guidance +
    *  what the model actually produced in one record. Absent until the turn ends

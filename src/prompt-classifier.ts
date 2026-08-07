@@ -146,18 +146,30 @@ export function classifyViaAnthropic(ctx: ClassifyContext) {
         const chunks: Buffer[] = [];
         resp.on("data", (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
         resp.on("end", () => {
-          if ((resp.statusCode ?? 500) !== 200) return done(null);
+          const sc = resp.statusCode ?? 500;
+          if (sc !== 200) {
+            // Diagnostic: a non-200 => analyzer fails OPEN (verdict `allow`),
+            // indistinguishable from a genuine benign classification. Surface it on
+            // stderr so a silently-failing classifier (e.g. wrong auth) is visible.
+            process.stderr.write(`[prompt-guard] classifier HTTP ${sc} — failing open (allow)\n`);
+            return done(null);
+          }
           try {
             const json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
             done(parseClassifierJson(anthropicText(json)));
           } catch {
+            process.stderr.write(`[prompt-guard] classifier unparseable response — failing open (allow)\n`);
             done(null);
           }
         });
         resp.on("error", () => done(null));
       });
-      r.on("error", () => done(null));
+      r.on("error", (e) => {
+        process.stderr.write(`[prompt-guard] classifier request error (${e?.message ?? e}) — failing open (allow)\n`);
+        done(null);
+      });
       r.on("timeout", () => {
+        process.stderr.write(`[prompt-guard] classifier TIMEOUT — failing open (allow)\n`);
         r.destroy();
         done(null);
       });

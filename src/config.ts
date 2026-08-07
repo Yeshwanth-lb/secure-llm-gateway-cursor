@@ -50,6 +50,11 @@ export interface GatewayConfig {
   promptGuardModel: string;
   /** Hard timeout (ms) for the Tier-2 classifier call. Analyzer fails open past it. */
   promptGuardTimeoutMs: number;
+  /** Command guard (Checkpoint 2 v1) master switch. Ships DARK (default off):
+   *  classify a shell command the agent is about to run and deny/ask before it
+   *  executes. Deterministic (no LLM). FAIL-CLOSED (errors deny) — the inverse of
+   *  prompt-guard. When off, the surface hooks are not wired (nothing gated). */
+  commandGuardEnabled: boolean;
 }
 
 // Cursor exposes ONE global "Override OpenAI Base URL", so a single gateway
@@ -170,6 +175,8 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     // completes; the cost is ~1.5–2.5s added latency on non-trivial (Tier-1-hit)
     // prompts before forwarding. Lower it only with a faster classifier model.
     promptGuardTimeoutMs: toInt(process.env.GATEWAY_PROMPT_GUARD_TIMEOUT_MS, 4000),
+    // Command guard ships DARK: on only when GATEWAY_COMMAND_GUARD=on.
+    commandGuardEnabled: process.env.GATEWAY_COMMAND_GUARD === "on",
   };
   const merged: GatewayConfig = {
     ...base,
