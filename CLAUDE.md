@@ -328,7 +328,7 @@ documented, not yet wired). See `ADMIN_DASHBOARD.md`.
 armed + probed on ChatGPT, Grok, DeepSeek, gemini.google.com. Workspace-panel upload endpoint
 unprobed (the attach-time guard still scrubs; only the wire backstop is uncovered there).
 
-**Key operational gotchas** (full dated writeups archived in `LEDGER_HISTORY.md`):
+**Key operational gotchas:**
 - **Gateway restart** → Chrome re-asks Local Network Access; Allow it + reload the extension, or
   every SW→loopback `/redact` fails and sends/uploads block as `gateway-unreachable`.
 - **Workspace "Ask Gemini" composer** (appsElements `role=combobox`, controlled model): write the
@@ -348,9 +348,8 @@ unprobed (the attach-time guard still scrubs; only the wire backstop is uncovere
 - Ring-buffer `entries` is **not** chronological — sort by `timestamp` before taking "the latest".
 - A `\[REDACTED_PII_[A-Z_]+\]` scan silently misses `IPV4`/`IPV6` (they end in digits).
 
-> **Historical fix notes** — every dated writeup (Phases G–T, all the live-debugging narratives) —
-> were moved to [`LEDGER_HISTORY.md`](LEDGER_HISTORY.md) on 2026-08-03 to keep this operating manual
-> lean. Append new dated notes there, not here. The phase tables below remain the living gate record.
+> **Historical fix notes** — earlier per-phase dated writeups (Phases G–T live-debugging
+> narratives) were pruned during handoff cleanup. The phase tables below remain the living gate record.
 
 | Phase | Status | E2e tests (happy / failure / edge) | Suite green? | Notes |
 |---|---|---|---|---|

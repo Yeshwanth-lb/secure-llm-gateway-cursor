@@ -2,7 +2,7 @@
 
 *A plain-language summary of what this project is and everything built so far. Written to be
 read top-to-bottom when explaining the project to someone. For the exact engineering status
-see `CLAUDE.md` §8; for the full dated history see `LEDGER_HISTORY.md`.*
+see `CLAUDE.md` §8.*
 
 ---
 
@@ -127,7 +127,7 @@ Everything is backed by an automated test suite — **188 tests, all green.**
 - `extension/src/site-adapter.js` — the per-website settings (which box to type in, which request
   to watch), one entry per surface, keyed by hostname.
 - `tests/` — the 188-test suite (`npm test`).
-- `CLAUDE.md` — the operating manual + current status ledger. `LEDGER_HISTORY.md` — full history.
+- `CLAUDE.md` — the operating manual + current status ledger.
 
 ---
 

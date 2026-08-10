@@ -48,7 +48,7 @@ This registers the service, wires client config, and starts fail-closed. There a
 | **Cursor** | local hooks + `http` MCP | **Partial** — block-if-PII on prompts/file-reads; MCP log inspection |
 | **SDKs / LangChain** | point the provider base URL at the gateway | Full — routed by provider (Anthropic / Gemini / OpenAI-compatible) |
 
-> **Why Cursor is only partial:** Cursor makes model calls from **its own cloud servers**, not from your machine, and forbids private-network base URLs — so a loopback gateway is unreachable for Cursor chat. See [`CURSOR_REDACTION_BRIEF.md`](CURSOR_REDACTION_BRIEF.md) for the short version and [`CURSOR_BLOCKER_REPORT.md`](CURSOR_BLOCKER_REPORT.md) for the full investigation.
+> **Why Cursor is only partial:** Cursor makes model calls from **its own cloud servers**, not from your machine, and forbids private-network base URLs — so a loopback gateway is unreachable for Cursor chat. See [`CURSOR_INTEGRATION_PLAN.md`](CURSOR_INTEGRATION_PLAN.md) for the details.
 
 ## Configuration
 
@@ -99,9 +99,6 @@ tests/                  phase-*.test.ts
 | [`DEVELOPERS.md`](DEVELOPERS.md) | Human setup / run / test detail |
 | [`AGENTS.md`](AGENTS.md) | Tool-agnostic summary |
 | [`newplan.md`](newplan.md) · [`PRD.md`](PRD.md) · [`IMPLEMENTATION_GUIDE.md`](IMPLEMENTATION_GUIDE.md) | Design authority (newplan wins on conflict) |
-| [`CURSOR_REDACTION_BRIEF.md`](CURSOR_REDACTION_BRIEF.md) | Lead brief — Cursor findings, one screen |
-| [`CURSOR_BLOCKER_REPORT.md`](CURSOR_BLOCKER_REPORT.md) | Full Cursor blocker investigation |
-| [`CURSOR_TOOL_REDACTION_PLAN.md`](CURSOR_TOOL_REDACTION_PLAN.md) | Phase L plan — `preToolUse`/`postToolUse` tool-data scrub |
 | [`CURSOR_INTEGRATION_PLAN.md`](CURSOR_INTEGRATION_PLAN.md) | Cursor integration design + limitations |
 
 ## Security invariants
