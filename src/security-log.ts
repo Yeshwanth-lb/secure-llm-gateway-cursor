@@ -15,7 +15,7 @@ export interface SecurityLogEntry {
    *  back-compat with existing rows. Command Guard (Checkpoint 2) sets
    *  "command-guard" and uses the command-* fields below instead of the
    *  prompt-guard fields. */
-  kind?: "prompt-guard" | "command-guard";
+  kind?: "prompt-guard" | "command-guard" | "action-guard" | "action-guard-error";
   surface: "claude-code" | "cursor-rules" | "cursor-hook" | "cursor";
   // --- prompt-guard fields (Checkpoint 1) — present on prompt-guard rows -------
   verdict?: AnalyzerVerdict;
@@ -42,6 +42,13 @@ export interface SecurityLogEntry {
   /** Where the decision was delivered/enforced. */
   provider?: string;
   model?: string;
+  // --- action-guard fields (Checkpoint 2b) — present on code-scan rows ---------
+  /** The file that was scanned (path only — raw code is NEVER stored here). */
+  filePath?: string;
+  /** The conversation/session id the findings accumulated under. */
+  conversationId?: string;
+  /** The security defects found (category/message/line metadata, no code). */
+  findings?: { tier: 1 | 2; category: string; message: string; line?: number }[];
 }
 
 const CAP = 200;
@@ -82,7 +89,7 @@ export const securityLog: {
       for (let i = buf.length - 1; i >= 0; i--) {
         const e = buf[i];
         if (e.surface !== surface || e.response !== undefined) continue;
-        const flagged = e.rawPrompt.trim();
+        const flagged = (e.rawPrompt ?? "").trim();
         if (flagged !== "" && (flagged === needle || needle.includes(flagged))) {
           e.response = response;
           return true;

@@ -55,6 +55,21 @@ export interface GatewayConfig {
    *  executes. Deterministic (no LLM). FAIL-CLOSED (errors deny) — the inverse of
    *  prompt-guard. When off, the surface hooks are not wired (nothing gated). */
   commandGuardEnabled: boolean;
+  /** Code Guard (Checkpoint 2b) master switch. Ships DARK (default off): scan the
+   *  code the agent just wrote and, if insecure, loop it to regenerate. FAIL-SAFE
+   *  (errors never block — the code is already on disk; the guarantee is the
+   *  regenerate follow-up + a loud audit row). When off, the scan/stop hooks are
+   *  not wired. */
+  actionGuardEnabled: boolean;
+  /** Code-Guard Tier-2 (LLM code scan) enable. Default ON — Tier-1 patterns are
+   *  blind to missing-auth/IDOR, so off means those are never caught. */
+  actionGuardTier2: boolean;
+  /** Max regenerate follow-ups before giving up (script-side cap under the 5/8
+   *  platform caps). */
+  actionGuardLoopLimit: number;
+  /** What to do when still dirty at the cap: "warn" (default — a loud unresolved
+   *  audit row, let the turn end) or "block" (end the turn visibly-failed). */
+  actionGuardCapBehavior: "warn" | "block";
 }
 
 // Cursor exposes ONE global "Override OpenAI Base URL", so a single gateway
@@ -177,6 +192,13 @@ export function loadConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     promptGuardTimeoutMs: toInt(process.env.GATEWAY_PROMPT_GUARD_TIMEOUT_MS, 4000),
     // Command guard ships DARK: on only when GATEWAY_COMMAND_GUARD=on.
     commandGuardEnabled: process.env.GATEWAY_COMMAND_GUARD === "on",
+    // Code Guard ships DARK: on only when GATEWAY_ACTION_GUARD=on. Tier-2 on
+    // unless explicitly disabled (Tier-1 alone misses missing-auth/IDOR).
+    actionGuardEnabled: process.env.GATEWAY_ACTION_GUARD === "on",
+    actionGuardTier2: process.env.GATEWAY_ACTION_GUARD_TIER2 !== "off",
+    actionGuardLoopLimit: toInt(process.env.GATEWAY_ACTION_GUARD_LOOP_LIMIT, 5),
+    actionGuardCapBehavior:
+      process.env.GATEWAY_ACTION_GUARD_CAP_BEHAVIOR === "block" ? "block" : "warn",
   };
   const merged: GatewayConfig = {
     ...base,

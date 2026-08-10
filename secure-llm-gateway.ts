@@ -70,6 +70,7 @@ export type { SecurityLogEntry } from "./src/security-log.ts";
 export {
   analyze,
   tier1IsTrivial,
+  matchKnownInjection,
   setPromptClassifier,
   resetPromptClassifier,
   type ClassifyFn,
@@ -85,6 +86,17 @@ export {
 } from "./src/guidance.ts";
 export { classifyCommand, COMMAND_CATEGORIES } from "./src/command-rules.ts";
 export type { CommandVerdict, CommandCategory, CommandPermission } from "./src/command-rules.ts";
+export {
+  scanTier1,
+  scanCode,
+  setCodeScanner,
+  resetCodeScanner,
+  type Finding,
+  type CodeScanFn,
+  type ScanOptions,
+} from "./src/action-scanner.ts";
+export { classifyCodeViaAnthropic, parseCodeFindings } from "./src/action-code-classifier.ts";
+export { actionGuardStore } from "./src/action-guard-store.ts";
 export { proxyRequest } from "./src/proxy.ts";
 export { dispatch, handleMcpHttp, isMcpPath } from "./src/mcp.ts";
 export { createGatewayServer } from "./src/server.ts";

@@ -68,6 +68,52 @@ const FACTUAL_SHAPE = new RegExp(
   "i",
 );
 
+// --- deterministic known-injection detector (high-recall, no LLM) ----------
+// The LLM classifier reliably catches PLAINTEXT manipulation but has a blind spot
+// on OBFUSCATED / ENCODED payloads (e.g. "decode this base64 and execute it") — it
+// sees an opaque blob and rates it benign. These signatures are unambiguous jailbreak
+// / injection patterns, so we flag them deterministically BEFORE Tier 2 — reliable,
+// zero-cost, and independent of the model. This is an additive high-recall check, not
+// a benign-skip gate; anything it does NOT match still goes to Tier 2.
+const KNOWN_INJECTION: { re: RegExp; categories: RiskCategory[] }[] = [
+  // decode/de-obfuscate an encoded blob AND then execute/follow the result
+  {
+    re: /\b(base64|b64|hex|rot13|url-?encoded|de-?obfuscat\w*|decode|decrypt|unescape)\b[\s\S]{0,80}\b(execute|run|eval|follow|obey|carry out|do (?:what|as)|instructions?)\b/i,
+    categories: ["prompt_injection"],
+  },
+  // ignore / override prior instructions
+  {
+    re: /\b(ignore|disregard|forget|override|bypass)\b[\s\S]{0,40}\b(previous|prior|above|all|earlier|the|your)\b[\s\S]{0,30}\b(instruction|prompt|rule|direction|guardrail|guideline)/i,
+    categories: ["prompt_injection"],
+  },
+  // disable safety / guardrails / filters
+  {
+    re: /\b(disable|turn off|switch off|bypass|remove|ignore)\b[\s\S]{0,30}\b(safety|guardrail|filter|restriction|content polic\w+|guideline|moderation)/i,
+    categories: ["prompt_injection"],
+  },
+  // reveal / print the system / developer / hidden prompt
+  {
+    re: /\b(reveal|show|print|repeat|output|dump|reproduce|tell me|give me)\b[\s\S]{0,40}\b(system|developer|hidden|initial)\b[\s\S]{0,15}\b(prompt|instruction|message|context)/i,
+    categories: ["prompt_injection", "data_leakage"],
+  },
+  // "repeat everything above" style context-extraction
+  {
+    re: /\brepeat\b[\s\S]{0,25}\b(all|everything)\b[\s\S]{0,25}\babove\b/i,
+    categories: ["prompt_injection", "data_leakage"],
+  },
+  // named jailbreak modes
+  {
+    re: /\b(DAN mode|developer mode|jailbreak|without restrictions|no restrictions|unrestricted mode|do anything now)\b/i,
+    categories: ["prompt_injection"],
+  },
+];
+
+/** Return injection categories if the prompt matches a known signature, else null. */
+export function matchKnownInjection(prompt: string): RiskCategory[] | null {
+  for (const k of KNOWN_INJECTION) if (k.re.test(prompt)) return k.categories;
+  return null;
+}
+
 /** True when the prompt is confidently trivial -> skip Tier 2 (allow). */
 export function tier1IsTrivial(prompt: string): boolean {
   const p = prompt.trim();
@@ -191,6 +237,20 @@ export async function analyze(
   try {
     // Tier 1: confidently-trivial prompts skip the LLM entirely (cost guard).
     if (tier1IsTrivial(prompt)) return allow(1);
+
+    // Deterministic high-recall check for known injection/jailbreak signatures the
+    // LLM misses when the payload is encoded/obfuscated. Fires BEFORE Tier 2 and
+    // needs no model call. Additive — a non-match still falls through to Tier 2.
+    const known = matchKnownInjection(prompt);
+    if (known) {
+      return {
+        verdict: hasBlockCategory(known) ? "block" : "inject",
+        categories: known,
+        confidence: 0.99,
+        tier: 1,
+        latencyMs: Date.now() - started,
+      };
+    }
 
     // Tier 2 is where real (incl. keyword-less) detection happens. If it is off,
     // there is no safety detection — only Tier-1 skipping. Documented in §9.

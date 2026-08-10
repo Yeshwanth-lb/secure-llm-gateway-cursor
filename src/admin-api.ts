@@ -227,12 +227,17 @@ export function handleAdminApi(
     // the model's (redacted) reply. JWT-gated here, same as every /admin/api/*.
     if (method === "GET" && path === "/admin/api/prompt-guard") {
       const n = Number(url.searchParams.get("limit")) || 100;
-      const entries = securityLog.recent(Number.isFinite(n) ? n : 100);
+      // Prompt-guard rows only: command-guard / action-guard rows share this log
+      // but carry no categories/guidance, so exclude them (else the loop below
+      // throws on their absent `categories` and the whole tab 400s).
+      const entries = securityLog
+        .recent(Number.isFinite(n) ? n : 100)
+        .filter((e) => e.kind !== "command-guard" && e.kind !== "action-guard" && e.kind !== "action-guard-error");
       const byCategory: Record<string, number> = {};
       let injected = 0;
       for (const e of entries) {
         if (e.guidance) injected++;
-        for (const c of e.categories) byCategory[c] = (byCategory[c] ?? 0) + 1;
+        for (const c of e.categories ?? []) byCategory[c] = (byCategory[c] ?? 0) + 1;
       }
       sendJson(res, 200, {
         entries,

@@ -15,6 +15,9 @@ import { analyze, type ClassifyFn } from "./prompt-analyzer.ts";
 import { classifyViaAnthropic } from "./prompt-classifier.ts";
 import { buildGuidance, hasBlockCategory } from "./guidance.ts";
 import { classifyCommand } from "./command-rules.ts";
+import { scanCode, type Finding } from "./action-scanner.ts";
+import { classifyCodeViaAnthropic } from "./action-code-classifier.ts";
+import { actionGuardStore } from "./action-guard-store.ts";
 import { handleMcpHttp, isMcpPath } from "./mcp.ts";
 import { CONSOLE_HTML } from "./console.ts";
 import { handleControlApi, isApiPath } from "./control-api.ts";
@@ -233,7 +236,8 @@ async function handleRequest(
   const hookPath = path === "/detect" || path === "/redact" || path === "/log-turn";
   const controlPath =
     path === "/logs" || path === "/rules" || path === "/security-log" ||
-    path === "/prompt-guard" || path === "/command-guard" || hookPath ||
+    path === "/prompt-guard" || path === "/command-guard" ||
+    path === "/action-guard/scan" || path === "/action-guard/pending" || hookPath ||
     isApiPath(path) || isMcpPath(path) || isAdminPath(path);
   if (
     controlPath &&
@@ -625,6 +629,105 @@ async function handleRequest(
           "Command Guard could not evaluate this command and denied it by default. Retry, or ask the user to run it manually if it is safe.",
       });
     }
+    return;
+  }
+
+  // Code Guard scan endpoint (Checkpoint 2b). The `afterFileEdit` / PostToolUse
+  // scan hooks POST the file the agent just wrote; we scan it (Tier 1 patterns ‖
+  // Tier 2 LLM, merged) and ACCUMULATE the findings under conversation_id. The
+  // stop hook drains them via /action-guard/pending to build the regenerate note.
+  //
+  // FAIL-SAFE (the inverse of /command-guard): the code is already on disk, there
+  // is nothing to block, so ANY error returns 200 with empty findings and logs an
+  // `action-guard-error` audit row — a scan that can't run must never break the
+  // agent's turn. When the guard is OFF, returns empty findings (feature disabled).
+  if (method === "POST" && path === "/action-guard/scan") {
+    if (!config.actionGuardEnabled) {
+      sendJson(res, 200, { findings: [] });
+      return;
+    }
+    let conversationId = "";
+    let filePath = "";
+    let surface: SecurityLogEntry["surface"] = "claude-code";
+    try {
+      const j = JSON.parse(bodyBuf.toString("utf8") || "{}");
+      const content = typeof j?.content === "string" ? j.content : "";
+      if (typeof j?.conversation_id === "string") conversationId = j.conversation_id;
+      if (typeof j?.file_path === "string") filePath = j.file_path;
+      if (j?.surface === "cursor") surface = "cursor";
+
+      let classify;
+      if (config.actionGuardTier2 && config.anthropicApiKey) {
+        classify = classifyCodeViaAnthropic({
+          upstreamBase: config.upstreams.anthropic,
+          headers: {
+            "x-api-key": config.anthropicApiKey,
+            "anthropic-version": config.anthropicVersion,
+          },
+          model: config.promptGuardModel,
+          timeoutMs: config.promptGuardTimeoutMs,
+        });
+      }
+      const findings = await scanCode(content, {
+        tier2Enabled: config.actionGuardTier2,
+        classify,
+        timeoutMs: config.promptGuardTimeoutMs,
+        filePath,
+      });
+      if (findings.length > 0) {
+        actionGuardStore.append(conversationId, findings);
+        // Loud audit row for the security team (metadata only — never the code).
+        securityLog.push({
+          id: randomUUID(),
+          timestamp: new Date().toISOString(),
+          kind: "action-guard",
+          surface,
+          conversationId,
+          filePath,
+          findings: findings.map((f) => ({ tier: f.tier, category: f.category, message: f.message, line: f.line })),
+          provider: surface === "cursor" ? "cursor" : "claude-code",
+        });
+      }
+      sendJson(res, 200, { findings });
+    } catch (e) {
+      securityLog.push({
+        id: randomUUID(),
+        timestamp: new Date().toISOString(),
+        kind: "action-guard-error",
+        surface,
+        conversationId,
+        filePath,
+      });
+      // fail-SAFE: never block; there is nothing to block.
+      sendJson(res, 200, { findings: [] });
+    }
+    return;
+  }
+
+  // Code Guard pending endpoint (Checkpoint 2b). The stop/Stop hook drains the
+  // conversation's accumulated findings ONCE per turn (read + clear) and, if any
+  // remain, turns them into a "regenerate securely" follow-up for the agent.
+  if (method === "GET" && path === "/action-guard/pending") {
+    if (!config.actionGuardEnabled) {
+      sendJson(res, 200, { findings: [], count: 0, message: "", loop_limit: 0, cap_behavior: "warn" });
+      return;
+    }
+    const conv = url.searchParams.get("conversation_id") ?? "";
+    const findings: Finding[] = conv ? actionGuardStore.take(conv) : [];
+    const message =
+      findings.length === 0
+        ? ""
+        : "Regenerate the code you just wrote to fix these security issues, then stop:\n" +
+          findings
+            .map((f) => `- [${f.category}]${f.line ? ` line ${f.line}:` : ""} ${f.message}`)
+            .join("\n");
+    sendJson(res, 200, {
+      findings,
+      count: findings.length,
+      message,
+      loop_limit: config.actionGuardLoopLimit,
+      cap_behavior: config.actionGuardCapBehavior,
+    });
     return;
   }
 
